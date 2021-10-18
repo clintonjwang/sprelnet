@@ -1,0 +1,70 @@
+spatial relation net:
+  distributions:
+    X*Y:
+      source: dataset
+      type: uniform empirical
+  random variables:
+    X:
+      dataset variable: image
+      distance:
+      - L1
+      - L1 of Sobel
+      domain: 2D image
+    Y:
+      dataset variable: segmentation
+  sampled inputs:
+    (x,y) ~ X*Y: datapoint
+  max epochs: 400
+  phase 1 end: 50
+  phase 2 end: 200
+  learning rate: 1e-5
+  checkpoint frequency: 25
+  validation frequency: 25
+  number of refinements: 0
+
+  network HPs:
+    number of heads: 12
+    relation kernel size: 13
+    number of relations: 32
+    patch size: 7,7
+    MiniSeg HPs:
+      channels by depth: 1,64,64,128,64,N_L
+      kernels by depth: 7,1,5,3,3
+      pool depths: 1
+    PatchTemplate HPs:
+      channels by depth: 1,64,64,N_L*N_V
+      kernels by depth: 3,1,3
+
+  loss weights:
+    sparsity weight: .1
+    smooth weight: .1
+    init guess weight: 1.
+
+direct SpRelNet:
+  batch size: 4
+  network HPs:
+    relation kernel size: 9
+    number of relations: 4
+    MiniSeg HPs:
+      channels by depth: 1,64,64,128,64,N_L
+      kernels by depth: 7,1,5,3,3
+      pool depths: 1
+  loss weights:
+    sparsity weight: 1.
+    smooth weight: 10.
+
+
+contrastive SpRelNet:
+  batch size: 4
+  validation frequency: 9999
+  network HPs:
+    relation kernel size: 9
+    number of relations: 4
+    MiniSeg HPs:
+      channels by depth: 1,64,64,128,64,N_L
+      kernels by depth: 7,1,5,3,3
+      pool depths: 1
+  loss weights:
+    sparsity weight: 10.
+    smooth weight: 100.
+
