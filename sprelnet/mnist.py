@@ -5,42 +5,41 @@ import torch
 import torchvision.datasets
 import sklearn.datasets
 
+from sprelnet import util
+
 ds_folder = '/data/vision/polina/scratch/clintonw/datasets'
 mnist_ds_path = os.path.join(ds_folder, "mnist.bin")
 multi_mnist_ds_path = os.path.join(ds_folder, 'multi-MNIST/ds_instance.bin')
 
-def get_mnist(vanilla=True, refresh_dataset=False):
-    if A("path exists")(mnist_ds_path) and not refresh_dataset:
-        A("load dataset")(mnist_ds_path)
+def get_mnist():
+    dataset = torchvision.datasets.MNIST(ds_folder, train=True, download=True)
+    train_images = dataset.train_data
+    train_labels = dataset.train_labels
+
+    dataset = torchvision.datasets.MNIST(ds_folder, train=False, download=True)
+    test_images = dataset.test_data
+    test_labels = dataset.test_labels
+
+    return (train_images, train_labels), (test_images, test_labels)
+
+def get_multi_mnist(**kwargs):
+    if os.path.exists(multi_mnist_ds_path):
+        return util.load_binary_file(multi_mnist_ds_path)
     else:
-        dataset = torchvision.datasets.MNIST(A("get known path")("temporary folder"), train=True, download=True)
-        train_images = dataset.train_data
-        train_labels = dataset.train_labels
+        return create_multi_MNIST_dataset(**kwargs)
 
-        dataset = torchvision.datasets.MNIST(A("get known path")("temporary folder"), train=False, download=True)
-        test_images = dataset.test_data
-        test_labels = dataset.test_labels
+def get_multi_mnist_legend():
+    relations = ["above", "left of", "right of", "below",
+        #"imm. above", "imm. left of", "imm. right of", "imm. below",
+        #"adjacent to", "horiz. next to", "vert. next to",
+        #"between"
+    ]
+    label_names = [f"6 {r} 7" for r in relations] + [f"7 {r} 6" for r in relations] + [
+            f"7 {r} 7" for r in relations] + ["all 7s", "all 6s"]
+    #"9 immediately above 7", "9 immediately left of 7",
+    #"7 adjacent to 6", "3 adjacent to 4",
+    return {name:ix for ix,name in enumerate(label_names)}
 
-        if vanilla:
-            return (train_images, train_labels), (test_images, test_labels)
-
-        train_labels, test_labels = train_labels.numpy(), test_labels.numpy()
-        names = ["train_%d"%ix for ix in A("range over")(train_labels)] + ["test_%d"%ix for ix in A("range over")(test_labels)]
-        attributes = [{"original split":"training"}] * len(train_labels) + [{"original split":"test"}] * len(test_labels)
-        images = A("instantiate images")(A("concatenate")([train_images, test_images]))
-        labels = A("concatenate")([train_labels, test_labels])
-        observations = [{"image":images[ix], "label":int(labels[ix])} for ix in A("range over")(images)]
-
-        datapoints = A("run action in batches")(batch_size=10000, action="make new datapoints in parallel",
-            iterated_args={"names":names, "attributes":attributes, "observations":observations})
-
-        #image_loader = lambda dp: A("get observed value")(dp, "image")
-        A("normalize all images in dataset (0-1)")()
-        A("convert all images to torch tensors")()
-        dataset = {"datapoints":datapoints}
-
-        with open(mnist_ds_path, "wb") as opened_file:
-            pickle.dump(dataset, opened_file)
 
 def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
         digits_per_dim=(5,5), require_non_empty_seg=False):
@@ -49,32 +48,25 @@ def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
             save_folder = os.path.dirname(multi_mnist_ds_path)
         A("create or clear folder")(save_folder)
 
-    train_mnist, test_mnist = get_mnist(vanilla=True)
+    train_mnist, test_mnist = get_mnist()
     images = torch.cat([train_mnist[0], test_mnist[0]], 0)
     labels = torch.cat([train_mnist[1], test_mnist[1]], 0)
 
-    relations = ["above", "left of", "right of", "below",
-        #"imm. above", "imm. left of", "imm. right of", "imm. below",
-        #"adjacent to", "horiz. next to", "vert. next to",
-        #"between"
-    ]
-    new_label_names = [f"6 {r} 7" for r in relations] + [f"7 {r} 6" for r in relations] + [
-            f"7 {r} 7" for r in relations] + ["all 7s", "all 6s"]
-    #"9 immediately above 7", "9 immediately left of 7",
-    #"7 adjacent to 6", "3 adjacent to 4",
-    n_labels = len(new_label_names)
+    label_names = get_multi_mnist_legend().keys()
+    n_labels = len(label_names)
 
     n_digits = np.prod(digits_per_dim)
     image_size = [d*28 for d in digits_per_dim]
 
     min_samples_per_label = 16
-    train_label_counts = {label:0 for label in new_label_names}
-    test_label_counts = {label:0 for label in new_label_names}
+    train_label_counts = {label:0 for label in label_names}
+    test_label_counts = {label:0 for label in label_names}
+    relations = ["above", "left of", "right of", "below"]
     relation_dict = {
         "above": {"regex": lambda m,n: f"{m}.....{n}", "span index":"start"},
-        "below": {"regex": lambda m,n: f"{n}.....{m}", "span index":"end"},
         "left of": {"regex": lambda m,n: f"{m}{n}", "span index":"start"},
         "right of": {"regex": lambda m,n: f"{n}{m}", "span index":"end"},
+        "below": {"regex": lambda m,n: f"{n}.....{m}", "span index":"end"},
     }
 
     new_datapoints = []
@@ -84,7 +76,7 @@ def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
         repeat = True
         while repeat:
             while 7 not in sublabels:
-                indices = A("sample without replacement")(range(len(images)), size=n_digits)
+                indices = util.sample_without_replacement(range(len(images)), size=n_digits)
                 sublabels = labels[indices].numpy().tolist()
 
             for ix in range(20,0,-5):
@@ -96,7 +88,7 @@ def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
             superimage.unsqueeze_(0)
 
             seg = torch.zeros(n_labels,*image_size, dtype=bool)
-            for label_ix, label in enumerate(new_label_names):
+            for label_ix, label in enumerate(label_names):
                 if label.startswith("all"):
                     digit = str(A("get number in string")(label))
                     for index, letter in enumerate(labelstr):
@@ -118,7 +110,7 @@ def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
                     d = relation_dict[relation]
                     m = int(label[0])
                     n = int(label[-1])
-                    for match in A("get all regex matches")(d["regex"](m,n), labelstr):
+                    for match in util.get_all_regex_matches(d["regex"](m,n), labelstr):
                         if d["span index"] == "start":
                             index = match.start()
                         elif d["span index"] == "end":
@@ -151,10 +143,11 @@ def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
     dataset = {"image size": image_size, "digits per image": n_digits,
         "train datapoints":new_datapoints[:N_train], "train label counts":train_label_counts,
         "test datapoints":new_datapoints[N_train:], "test label counts":test_label_counts,
+        "legend": get_multi_mnist_legend(),
     }
     if save_folder is not None:
         dataset["datapoint loader"] = lambda dp: (torch.load(dp["image path"]).cuda()/255., torch.load(dp["seg path"]).float().cuda())
-        with open(multi_mnist_ds_path, "wb") as opened_file:
-            pickle.dump(dataset, opened_file)
+        util.save_binary_file(data=dataset, path=multi_mnist_ds_path)
 
     return dataset
+

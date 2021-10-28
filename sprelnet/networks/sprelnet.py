@@ -4,9 +4,27 @@ import torch
 nn = torch.nn
 F = nn.functional
 
-from am.world.vision.affine import randomly_scale_image, randomly_rotate_image
-from .unet import *
+from sprelnet import util
+from sprelnet.networks.unet import *
 
+def get_adv_sprelnet(net_HPs, dataset):
+    # HPs = {**util.get_default_HPs(network_type), **HPs}
+    kwargs = {
+        "output_semantic": net_HPs["output semantic"],
+        "image_size": dataset["image size"],
+        "num_labels": len(dataset["train label counts"]),
+        "kernel_size": (net_HPs["relation kernel size"], net_HPs["relation kernel size"]),
+        "num_relations": net_HPs["number of relations"],
+        "miniseg_HPs": net_HPs["segmenter architecture"],
+    }
+    miniseg_HPs = kwargs["miniseg_HPs"]
+    if isinstance(miniseg_HPs["channels by depth"], str):
+        miniseg_HPs["channels by depth"] = miniseg_HPs["channels by depth"].replace("N_L", str(kwargs["num_labels"]))
+        for k,v in miniseg_HPs.items():
+            miniseg_HPs[k] = util.parse_int_list(v)
+
+    sprelnet = AdversarialSpRelNet(**kwargs).cuda()
+    return sprelnet
 
 
 class match_XY(nn.Module):
@@ -20,17 +38,51 @@ class match_XY(nn.Module):
     def forward(self, x,y):
         return self.layers(torch.cat([x,y], dim=1)).squeeze(1)
 
-
-class relation_pyramid(nn.Module): #multiscale
+class rel_pyramid_likelihood(nn.Module):
     def __init__(self, kernel_size, num_labels, N_levels):
         super().__init__()
         self.N_L = num_labels
         self.N_levels = N_levels #relations per label
         self.kernel_size = kernel_size
 
-        self.pyramid = [nn.Conv2d(self.N_L, self.N_L, kernel_size=self.kernel_size,
-                padding=[k//2 for k in self.kernel_size], bias=False).cuda() for _ in range(N_levels)]
         K = [k//2 for k in self.kernel_size]
+        self.pyramid = [nn.Conv2d(self.N_L, 2*self.N_L, kernel_size=self.kernel_size,
+                padding=K, bias=False).cuda() for _ in range(N_levels)]
+        for r_m in self.pyramid:
+            torch.nn.init.normal_(r_m.weight, std=1.) # aggressive initialization
+            W = r_m.weight.data
+            for i in range(self.N_L):
+                W[i:W.size(0):self.N_L, i, K[0],K[1]].zero_() # "mask" the inpainted patch
+            r_m.weight = nn.Parameter(W)
+
+    def forward(self, y, eps=1e-6):
+        # should return a loss (to be minimized individually and for the generator)
+        nll = torch.zeros(y.size(0)).to(y.device)
+        for level in range(self.N_levels):
+            r_m = self.pyramid[level](y).view(-1, 2, self.N_L, y.size(-2), y.size(-1))
+            mu,var = r_m[:,0], torch.clamp(torch.exp(r_m[:,1]), min=eps)
+            nll += ((y - mu).pow(2) / var + torch.log(var)).sum([1,2,3]).mean(0)
+            y = F.avg_pool2d(y,2)
+        return nll
+
+    def get_pyramid(self, y):
+        outputs = []
+        for level in range(self.N_levels):
+            outputs.append(self.pyramid[level](y))
+            y = F.avg_pool2d(y,2)
+        return outputs
+
+
+class rel_pyramid_estimator(nn.Module):
+    def __init__(self, kernel_size, num_labels, N_levels):
+        super().__init__()
+        self.N_L = num_labels
+        self.N_levels = N_levels #relations per label
+        self.kernel_size = kernel_size
+
+        K = [k//2 for k in self.kernel_size]
+        self.pyramid = [nn.Conv2d(self.N_L, self.N_L, kernel_size=self.kernel_size,
+                padding=K, bias=False).cuda() for _ in range(N_levels)]
         for r_m in self.pyramid:
             torch.nn.init.normal_(r_m.weight, std=1.) # aggressive initialization
             W = r_m.weight.data
@@ -40,7 +92,8 @@ class relation_pyramid(nn.Module): #multiscale
 
         self.bce = nn.BCEWithLogitsLoss()
 
-    def score_Y(self, y):
+    def forward(self, y):
+        # should return a loss (to be minimized individually and for the generator)
         # we do not require every relation to match in order to have a high score,
         # matching a few relations well should give a better score...
         # weight different levels differently?
@@ -53,17 +106,17 @@ class relation_pyramid(nn.Module): #multiscale
             #score += 1 / (logits*(y_hat-y)).abs().mean([1,2,3]) #csprel2
             #score += 1 / (y_hat-y).abs().mean([1,2,3]) #csprel3
             score += (1 / (y_hat-y).abs().mean([2,3])).mean(1) #csprel1, csprel4
+            #score += (1 / (logits*(y_hat-y)).abs().mean([2,3])).mean(1)
             #score += -self.bce(logits.pow(3), y) #csprel5
             y = F.avg_pool2d(y,2)
-        return score
+        return -score #torch.log
 
-    def forward(self, y):
+    def get_pyramid(self, y):
         outputs = []
         for level in range(self.N_levels):
             outputs.append(self.pyramid[level](y))
             y = F.avg_pool2d(y,2)
         return outputs
-
 
 
 class Id_Y(nn.Module):
@@ -88,43 +141,52 @@ class Id_Y(nn.Module):
 
 
 
-class DirectSpRelNet(nn.Module):
+class AdversarialSpRelNet(nn.Module):
     def __init__(self, image_size, num_labels, kernel_size=(9,9),
-            num_relations=4, miniseg_HPs=None, multiscale=True):
+            num_relations=4, miniseg_HPs=None, multiscale=True, output_semantic=None):
         super().__init__()
         self.N_r = num_relations #relations per label
         self.N_L = num_labels
+        self.output_semantic = output_semantic
         self.kernel_size = kernel_size
         self.image_size = image_size
-        self.D_XY = match_XY(num_labels + 1)
 
-        self.annealing = annealing
+        if miniseg_HPs is None:
+            self.G = MiniSeg()
+        else:
+            self.G = MiniSeg(miniseg_HPs["channels by depth"],
+                    miniseg_HPs["kernels by depth"], miniseg_HPs["pool depths"])
+
+        self.D_XY = match_XY(num_labels + 1)
         self.multiscale = multiscale
 
         if self.multiscale is True:
-            self.relnet = relation_pyramid(kernel_size, num_labels, N_levels=num_relations)
+            if self.output_semantic == "Gaussian likelihood":
+                self.relnet = rel_pyramid_likelihood(kernel_size, num_labels, N_levels=num_relations)
+            elif self.output_semantic == "MAP estimate":
+                self.relnet = rel_pyramid_estimator(kernel_size, num_labels, N_levels=num_relations)
+            else:
+                raise NotImplementedError
         else:
-            self.relnet = Id_Y(kernel_size, num_labels, num_relations)
+            if self.output_semantic == "MAP estimate":
+                self.relnet = Id_Y(kernel_size, num_labels, num_relations)
+            else:
+                raise NotImplementedError
 
         self.regularizers = {"total variation": 1.,
             "scaling robustness": 1.05,
             "rotation robustness": 5}
 
-        if miniseg_HPs is None:
-            self.miniseg = MiniSeg()
-        else:
-            self.miniseg = MiniSeg(miniseg_HPs["channels by depth"],
-                    miniseg_HPs["kernels by depth"], miniseg_HPs["pool depths"])
-
-    def score_Y(self, y):
+    def score(self, y):
         if self.multiscale is True:
-            return self.relnet.score_Y(y)
+            return self.relnet(y)
         else:
             y_down = F.avg_pool2d(y,2)
             return -((torch.sigmoid(self.relnet(y_down)) - y_down).abs().sum([1,2,3]))
 
     def forward(self, X):
-        return self.miniseg(X)
+        return self.G(X)
+
 
 
 class ContrastiveSpRelNet(nn.Module):
@@ -178,11 +240,11 @@ class ContrastiveSpRelNet(nn.Module):
             elif reg_type == "scaling robustness":
                 if isinstance(weight, float):
                     weight = (1/weight, weight)
-                y = randomly_scale_image(y, weight)
+                y = util.randomly_scale_image(y, weight)
             elif reg_type == "rotation robustness":
                 if not hasattr(weight, "__iter__"):
                     weight = (-weight, weight)
-                y = randomly_rotate_image(y, degree_range=weight)
+                y = util.randomly_rotate_image(y, degree_range=weight)
             else:
                 raise NotImplementedError(f"bad regularizer type {reg_type}")
 

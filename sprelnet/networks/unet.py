@@ -4,6 +4,8 @@ import torch
 nn = torch.nn
 F = nn.functional
 
+def get_unet(net_HPs, dataset):
+    return UNet(len(dataset["train label counts"])).cuda()
 
 class MiniSeg(nn.Module):
     def __init__(self, channels_by_depth, kernels_by_depth, pool_depths=tuple()):
