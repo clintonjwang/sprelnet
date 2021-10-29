@@ -7,6 +7,14 @@ F = nn.functional
 from sprelnet import util
 from sprelnet.networks.unet import *
 
+def get_relnet(net_HPs, dataset):
+    kernel_size = (net_HPs["relation kernel size"], net_HPs["relation kernel size"])
+    num_labels = len(dataset["train label counts"])
+    N_levels = net_HPs["number of relations"]
+
+    return rel_pyramid_likelihood(kernel_size, num_labels, N_levels)
+
+
 def get_adv_sprelnet(net_HPs, dataset):
     # HPs = {**util.get_default_HPs(network_type), **HPs}
     kwargs = {
@@ -16,6 +24,7 @@ def get_adv_sprelnet(net_HPs, dataset):
         "kernel_size": (net_HPs["relation kernel size"], net_HPs["relation kernel size"]),
         "num_relations": net_HPs["number of relations"],
         "miniseg_HPs": net_HPs["segmenter architecture"],
+        "type": net_HPs["type"],
     }
     miniseg_HPs = kwargs["miniseg_HPs"]
     if isinstance(miniseg_HPs["channels by depth"], str):
@@ -23,7 +32,7 @@ def get_adv_sprelnet(net_HPs, dataset):
         for k,v in miniseg_HPs.items():
             miniseg_HPs[k] = util.parse_int_list(v)
 
-    sprelnet = AdversarialSpRelNet(**kwargs).cuda()
+    sprelnet = AdvSpRelNet(**kwargs).cuda()
     return sprelnet
 
 
@@ -46,8 +55,8 @@ class rel_pyramid_likelihood(nn.Module):
         self.kernel_size = kernel_size
 
         K = [k//2 for k in self.kernel_size]
-        self.pyramid = [nn.Conv2d(self.N_L, 2*self.N_L, kernel_size=self.kernel_size,
-                padding=K, bias=False).cuda() for _ in range(N_levels)]
+        self.pyramid = nn.Sequential(*[nn.Conv2d(self.N_L, 2*self.N_L, kernel_size=self.kernel_size,
+                padding=K, bias=False).cuda() for _ in range(N_levels)])
         for r_m in self.pyramid:
             torch.nn.init.normal_(r_m.weight, std=1.) # aggressive initialization
             W = r_m.weight.data
@@ -81,8 +90,8 @@ class rel_pyramid_estimator(nn.Module):
         self.kernel_size = kernel_size
 
         K = [k//2 for k in self.kernel_size]
-        self.pyramid = [nn.Conv2d(self.N_L, self.N_L, kernel_size=self.kernel_size,
-                padding=K, bias=False).cuda() for _ in range(N_levels)]
+        self.pyramid = nn.Sequential(*[nn.Conv2d(self.N_L, self.N_L, kernel_size=self.kernel_size,
+                padding=K, bias=False).cuda() for _ in range(N_levels)])
         for r_m in self.pyramid:
             torch.nn.init.normal_(r_m.weight, std=1.) # aggressive initialization
             W = r_m.weight.data
@@ -141,10 +150,11 @@ class Id_Y(nn.Module):
 
 
 
-class AdversarialSpRelNet(nn.Module):
+class AdvSpRelNet(nn.Module):
     def __init__(self, image_size, num_labels, kernel_size=(9,9),
-            num_relations=4, miniseg_HPs=None, multiscale=True, output_semantic=None):
+            num_relations=4, miniseg_HPs=None, multiscale=True, output_semantic=None, type=None):
         super().__init__()
+        self.type = type
         self.N_r = num_relations #relations per label
         self.N_L = num_labels
         self.output_semantic = output_semantic

@@ -12,12 +12,6 @@ def draw_images_with_colorbar():
 def lineplot():
     return
 
-def plot_losses_for_spatial_relation_net_job(job):
-    losses = util.get_losses_for_spatial_relation_net_job(job)
-    labels = list(losses["train losses"].keys())
-    lines = [losses["train losses"][k] for k in labels] + [losses["test losses"]]
-    lineplot(lines, labels=labels+["test"])
-
 def run_iterative_sprelnet_on_dp(seg, dp, n_iters=1000, dataset=None):
     if dataset is None:
         dataset = mnist.get_multi_mnist()
@@ -32,7 +26,7 @@ def run_iterative_sprelnet_on_dp(seg, dp, n_iters=1000, dataset=None):
     return {"gt": (X.cpu(), Y_gt.cpu()),
         "outputs": (y_0, fixY(Y))}
 
-def visualize_iterative_relations(seg, label1, label2, vmax=None, dataset=None):
+def visualize_relations(seg, label1, label2, vmax=None, dataset=None):
     kernels = []
     for r_m in seg.rel_pyr.pyramid:
         W = r_m.weight.clone().cpu().detach()
