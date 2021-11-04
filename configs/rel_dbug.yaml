@@ -1,0 +1,32 @@
+paths:
+  path to initial model weights: null
+
+data loading:
+  dataset: MNIST grid
+  train fraction: 0.85
+  batch size: 16
+
+optimizer:
+  epochs: 100
+  checkpoint frequency: 5
+  validation frequency: 5
+  learning rate: 2e-5
+  scheduler type: null
+  # accepts null, exponential, reduce on plateau
+
+loss:
+  debug: regs only
+  weights:
+    relation sparsity: 1.
+    relation smooth: 1.
+
+network:
+  type: relnet only
+  output semantic: Gaussian likelihood
+  relation kernel size: 9
+  number of relations: 3
+
+tags:
+  - debug
+random seed: 0
+fixed input size: True

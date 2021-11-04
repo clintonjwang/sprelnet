@@ -1,4 +1,4 @@
-import argparse, itertools, os, shutil, yaml, math
+import argparse, itertools, os, shutil, yaml, math, wandb
 import numpy as np
 import torch
 nn = torch.nn
@@ -6,14 +6,16 @@ F = nn.functional
 
 torch.backends.cudnn.deterministic = True
 
-from sprelnet import util, mnist, wab
-from sprelnet.networks.sprelnet import get_adv_sprelnet, get_relnet
+from sprelnet import util, losses, wab, visualize
+from sprelnet.data import mnist, pixels
+from sprelnet.networks.relations import get_relnet
 from sprelnet.networks.unet import get_unet
+from sprelnet.networks.adversarial import get_adv_sprelnet
+from sprelnet.networks.contrastive import get_contra_net, train_contranet
+from sprelnet.networks.patch_net import get_patch_net, train_patchnet
 
-import wandb
 
-
-def train_sprelnet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
+def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
     G = network.G
     relnet = network.relnet
     if network.type == "adversarial":
@@ -24,18 +26,14 @@ def train_sprelnet(paths, loss_settings, optimizer_settings, network, dataloader
     batch_size = dataloaders["train"].batch_size
     N_train = len(dataset["train datapoints"])
     N_test = len(dataset["test datapoints"])
-    pos_weight = [N_train / cnt * dataset["digits per image"] for \
-        label,cnt in dataset["train label counts"].items()]
-    bce_fxn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight).cuda())
-    # transpose because pos_weight only works on the last dim
-    bce_loss = lambda y1,y2: bce_fxn(y1.transpose(1,-1), y2.transpose(1,-1))
+    bce_loss = losses.get_bce_loss(dataset)
 
     G_optim = torch.optim.Adam(G.parameters(), lr=float(optimizer_settings["G learning rate"]))
     if network.type == "adversarial":
         DR_optim = torch.optim.Adam(itertools.chain(relnet.parameters(), D.parameters()),
             lr=float(optimizer_settings["D learning rate"]))
     else:
-        DR_optim = torch.optim.Adam(relnet.parameters(), lr=float(optimizer_settings["D learning rate"]))
+        DR_optim = torch.optim.Adam(relnet.parameters(), lr=float(optimizer_settings["relnet learning rate"]))
 
     loss_names = ["rel true", "rel fake", "seg loss",
         "sparse kernel regularization", "smooth kernel regularization"]
@@ -48,15 +46,7 @@ def train_sprelnet(paths, loss_settings, optimizer_settings, network, dataloader
     test_losses = []
 
     # static regularizers
-    sparse_reg = torch.zeros([]).cuda()
-    smooth_reg = torch.zeros([]).cuda()
-    K = [k//2 for k in network.kernel_size]
-    for r_m in relnet.pyramid:
-        W = r_m.weight.clone()
-        sparse_reg += (W.abs()+1e-5).mean() * loss_weights["relation sparsity"]
-        smooth_reg += ((W[...,1:,:] - W[...,:-1,:]).abs().mean() + (
-            W[...,1:] - W[...,:-1]).abs().mean()) * loss_weights["relation smooth"]
-
+    K = [k//2 for k in relnet.kernel_size]
     for epoch in range(1, optimizer_settings["epochs"]+1):
         pxy_true_sum, pxy_fake_sum, rel_true_sum, rel_fake_sum, seg_loss_sum = 0,0, 0,0, 0
         n_batches = math.ceil(N_train/batch_size)
@@ -75,7 +65,7 @@ def train_sprelnet(paths, loss_settings, optimizer_settings, network, dataloader
 
             G_optim.zero_grad()
             if network.type == "adversarial":
-                G_loss = seg_loss - p_xy_fake + rel_fake
+                G_loss = seg_loss + rel_fake - p_xy_fake
             else:
                 G_loss = seg_loss + rel_fake
             G_loss.backward(retain_graph=True)
@@ -99,8 +89,9 @@ def train_sprelnet(paths, loss_settings, optimizer_settings, network, dataloader
             else:
                 DR_loss = rel_true
             DR_loss.backward()
-            sparse_reg.backward(retain_graph=True)
-            smooth_reg.backward(retain_graph=True)
+            sparse_reg, smooth_reg = losses.get_multiscale_kernel_regs(relnet, loss_weights)
+            sparse_reg.backward()
+            smooth_reg.backward()
             for i in range(network.N_L):
                 for r_m in relnet.pyramid:
                     r_m.weight.grad[i, i, K[0],K[1]] = 0 # "mask" the inpainted patch
@@ -122,46 +113,89 @@ def train_sprelnet(paths, loss_settings, optimizer_settings, network, dataloader
             train_losses[k].append(v)
 
         if epoch % optimizer_settings["validation frequency"] == 0:
+            wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="training 1")
+            wab.log_sample_outputs(X[1], Y_gt[1], Y_hat[1], dataset=dataset, name="training 2")
+            
             network.eval()
+
+            wab.log_relnet(relnet, dataset)
             loss_sum = 0
             n_batches = math.ceil(N_test/batch_size)
             for batch in dataloaders["test"]:
                 X,Y_gt = batch
-                Y_hat = G(X)
-                loss = bce_loss(Y_hat, Y_gt)
+                Y_logits = G(X)
+                loss = bce_loss(Y_logits, Y_gt)
                 loss_sum += loss.item()
             test_loss = loss_sum/n_batches
 
             wandb.log({"test loss": test_loss})
+            wab.log_sample_outputs(X[0], Y_gt[0], torch.sigmoid(Y_logits[0]), dataset=dataset, name="validation 1")
+            wab.log_sample_outputs(X[1], Y_gt[1], torch.sigmoid(Y_logits[1]), dataset=dataset, name="validation 2")
 
             network.train()
 
-        if epoch % optimizer_settings["checkpoint frequency"] == 0:
-            torch.save(network.state_dict(),
-                os.path.join(paths["model weights directory"], f"{epoch}.state"))
-            util.save_binary_file(data=network,
-                path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
+        # if epoch % optimizer_settings["checkpoint frequency"] == 0:
+        #     torch.save(network.state_dict(),
+        #         os.path.join(paths["model weights directory"], f"{epoch}.state"))
+        #     util.save_binary_file(data=network,
+        #         path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
 
-    #wandb.watch(network)
+    # loss_dict = {"train losses":train_losses, "test losses":test_losses}
+    # torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"{epoch}.state"))
+    # util.save_binary_file(data=network, path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
+    # return results
 
-    losses = {"train losses":train_losses, "test losses":test_losses}
-    torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"{epoch}.state"))
-    util.save_binary_file(data={"train losses":train_losses, "test losses":test_losses},
-        path=paths["loss history path"])
-    util.save_binary_file(data=network, path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
-    return results
+
+def train_relnet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
+    batch_size = dataloaders["train"].batch_size
+    N_train = len(dataset["train datapoints"])
+    N_test = len(dataset["test datapoints"])
+    loss_weights = loss_settings["weights"]
+
+    optimizer = torch.optim.Adam(network.parameters(), lr=float(optimizer_settings["learning rate"]))
+
+    train_losses = {
+        "relation loss": [],
+    }
+    test_losses = []
+    best_dice = 0
+    relnet = network
+    for epoch in range(1, optimizer_settings["epochs"]+1):
+        loss_sum = 0
+        n_batches = math.ceil(N_train/batch_size)
+
+        for batch in dataloaders["train"]:
+            optimizer.zero_grad()
+            if not ("debug" in loss_settings and loss_settings["debug"] == "regs only"):
+                _,Y_gt = batch
+                loss = network(Y_gt).mean()
+                loss_sum += loss.item()
+                loss.backward()
+
+            sparse_reg, smooth_reg = losses.get_multiscale_kernel_regs(network, loss_weights)
+            sparse_reg.backward()
+            smooth_reg.backward()
+
+            optimizer.step()
+
+        train_loss = {
+            "relation loss": loss_sum/n_batches,
+            "sparse reg": sparse_reg.item(),
+            "smooth reg": smooth_reg.item(),
+        }
+        wandb.log(train_loss)
+
+        if epoch % optimizer_settings["validation frequency"] == 0:
+            network.eval()
+            wab.log_relnet(network, dataset)
+            network.train()
 
 
 def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
     batch_size = dataloaders["train"].batch_size
     N_train = len(dataset["train datapoints"])
     N_test = len(dataset["test datapoints"])
-    pos_weight = [N_train / cnt * dataset["digits per image"] for \
-        label,cnt in dataset["train label counts"].items()]
-    bce_fxn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight).cuda())
-    # transpose because pos_weight only works on the last dim
-    bce_loss = lambda y1,y2: bce_fxn(y1.transpose(1,-1), y2.transpose(1,-1))
-    labels_to_record = ["6 left of 7", "7 right of 7", "all 7s"]
+    bce_loss = losses.get_bce_loss(dataset)
 
     optimizer = torch.optim.Adam(network.parameters(), lr=float(optimizer_settings["learning rate"]))
 
@@ -177,8 +211,8 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
         for batch in dataloaders["train"]:
             optimizer.zero_grad()
             X,Y_gt = batch
-            Y_hat = network(X)
-            loss = bce_loss(Y_hat, Y_gt)
+            Y_logits = network(X)
+            loss = bce_loss(Y_logits, Y_gt)
             loss_sum += loss.item()
             loss.backward()
             optimizer.step()
@@ -192,14 +226,21 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
 
         if epoch % optimizer_settings["validation frequency"] == 0:
             network.eval()
+            Y_hat = torch.sigmoid(Y_logits)
+            wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="training 1")
+            wab.log_sample_outputs(X[1], Y_gt[1], Y_hat[1], dataset=dataset, name="training 2")
+
             loss_sum = 0
             n_batches = math.ceil(N_test/batch_size)
 
-            columns = ["image"]
-            for label in labels_to_record:
-                columns += [f"GT seg ({label})", f"predicted seg ({label})", f"IOU ({label})"]
-            table = wandb.Table(columns=columns)
+            # columns = ["image"]
+            # if dataset["name"] != "MNIST grid":
+            #     raise NotImplementedError("labels_to_record for non MNIST")
+            # for label in mnist.labels_to_record:
+            #     columns += [f"GT seg ({label})", f"predicted seg ({label})", f"IOU ({label})"]
+            # table = wandb.Table(columns=columns)
 
+            dices = []
             for batch in dataloaders["test"]:
                 X,Y_gt = batch
                 Y_logits = network(X)
@@ -207,41 +248,80 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
                 loss_sum += loss.item()
                 Y_hat = torch.sigmoid(Y_logits)
 
-                dice = util.dice(Y_hat > .5, Y_gt > .5)
+                dices.append(util.dice(Y_hat > .5, Y_gt > .5))
 
-                img = wab.to_wandb_img(X[0])
-                row = [img]
-                for label in labels_to_record:
-                    legend = mnist.get_multi_mnist_legend()
-                    label_ix = legend[label]
-                    gt_seg = wab.to_wandb_img(Y_gt[0,label_ix])
-                    pred_seg = wab.to_wandb_img(Y_hat[0,label_ix])
-                    iou = util.iou(pred_seg > .5, gt_seg > .5)
-                    row += [gt_seg, pred_seg, iou]
-                table.add_data(*row)
+                # img = wab.to_wandb_img(X[0])
+                # row = [img]
+                # if dataset["name"] != "MNIST grid":
+                #     raise NotImplementedError("labels_to_record for non MNIST")
+                # for label in mnist.labels_to_record:
+                #     legend = mnist.get_multi_mnist_legend()
+                #     label_ix = legend[label]
+                #     gt_seg = wab.to_wandb_img(Y_gt[0,label_ix])
+                #     pred_seg = wab.to_wandb_img(Y_hat[0,label_ix])
+                #     iou = util.iou(pred_seg > .5, gt_seg > .5)
+                #     row += [gt_seg, pred_seg, iou]
+                # table.add_data(*row)
 
-            if dice > best_dice:
-                run.summary["best_dice"] = best_dice = dice
+            mean_dice = torch.cat(dices, dim=0).mean()
+            if mean_dice > best_dice:
+                run.summary["best_dice"] = best_dice = mean_dice
 
             test_loss = loss_sum/n_batches
             test_losses.append(test_loss)
-            wandb.log({"gt_seg": gt_seg, "pred_seg": pred_seg, "test loss": test_loss})
+            wandb.log({"test loss": test_loss})
+            wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="validation 1")
+            wab.log_sample_outputs(X[1], Y_gt[1], Y_hat[1], dataset=dataset, name="validation 2")
             network.train()
 
-        if epoch % optimizer_settings["checkpoint frequency"] == 0:
-            torch.save(network.state_dict(),
-                os.path.join(paths["model weights directory"], f"{epoch}.state"))
-            util.save_binary_file(data=network,
-                path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
+        # if epoch % optimizer_settings["checkpoint frequency"] == 0:
+        #     torch.save(network.state_dict(),
+        #         os.path.join(paths["model weights directory"], f"{epoch}.state"))
+        #     util.save_binary_file(data=network,
+        #         path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
 
-    losses = {"train losses":train_losses, "test losses":test_losses}
-    torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"{epoch}.state"))
-    util.save_binary_file(data=network, path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
+    # losses = {"train losses":train_losses, "test losses":test_losses}
+    # torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"{epoch}.state"))
+    # util.save_binary_file(data=network, path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
     # results = {"dataset": dataset, "model":network.eval(), "losses": losses}
     # util.save_binary_file(data=results, path=os.path.join("network histories folder", f"{job_name}.bin"))
-    return results
+    # return results
 
 
+def prep_run(cmd_args, args):    
+    if "tags" not in args:
+        args["tags"] = []
+
+    config = {k:args[k] for k in ["network", "loss", "optimizer", "data loading"]}
+    run = wandb.init(project="main_project", config=config, tags=args["tags"],
+            name=cmd_args.job_id, entity="spatial_relations",
+            settings=wandb.Settings(start_method="fork"))
+
+    # fill in paths
+    paths = args["paths"]
+    paths["job output directory"] = util.get_job_output_folder(cmd_args.job_id)
+    # paths["loss history path"] = os.path.join(paths["job output directory"], "losses.bin")
+    # paths["model weights directory"] = os.path.join(paths["job output directory"], "models")
+    # if not os.path.exists(paths["model weights directory"]):
+    #     os.makedirs(paths["model weights directory"])
+
+    for k in ("learning rate", "D learning rate", "G learning rate"):
+        if k in args["optimizer"]:
+            args["optimizer"][k] = float(args["optimizer"][k])
+
+    # copy code base and config file to slurm output
+    # util.save_code_dir(util.get_code_directory(), paths["job output directory"])
+    config_target_path = os.path.join(paths["job output directory"], "config.yaml")
+    shutil.copy(cmd_args.config_path, config_target_path)
+    with open(config_target_path, "a") as f:
+        f.write(f"\nrun_id: {os.path.basename(run.path)}")
+        f.write(f"\nrun_path: {run.path}")
+
+    util.set_random_seed(args["random seed"])
+    if args["fixed input size"] is True:
+        torch.backends.cudnn.benchmark = True
+
+    return run, args
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -250,68 +330,42 @@ if __name__ == "__main__":
     cmd_args = parser.parse_args()
     # class cmd_args:
     #     job_id = "test_00"
-    #     config_path = f"/data/vision/polina/users/clintonw/code/sprelnet/configs/{job_id}.yaml"
+    #     config_path = f"{util.base_proj_dir}/configs/{job_id}.yaml"
+    #     os.makedirs(f"{util.base_job_dir}/{job_id}")
     with open(cmd_args.config_path, 'r') as stream:
         args = yaml.safe_load(stream)
         
-    if "tags" not in args:
-        args["tags"] = [args["network"]["type"]]
+    run, args = prep_run(cmd_args, args)
 
-    config = {k:args[k] for k in ["network", "loss", "optimizer", "data loading"]}
-    run = wandb.init(project="spatial_relations", config=config, tags=args["tags"],
-            name=cmd_args.job_id) #entity="clintonjwang",
-    run_id = os.path.basename(run.path)
+    if args["data loading"]["dataset"] == "MNIST grid":
+        dataset = mnist.get_multi_mnist(run=run)
+    elif args["data loading"]["dataset"] == "pixels":
+        dataset = pixels.get_pixel_dataset(run=run)
+    else:
+        raise NotImplementedError("bad dataset")
 
-    # fill in paths
-    paths = args["paths"]
-    paths["job output directory"] = util.get_job_output_folder(cmd_args.job_id)
-    # paths["loss history path"] = os.path.join(paths["job output directory"], "losses.bin")
-    paths["model weights directory"] = os.path.join(paths["job output directory"], "models")
-    if not os.path.exists(paths["model weights directory"]):
-        os.makedirs(paths["model weights directory"])
-
-    for k in ("learning rate", "D learning rate", "G learning rate"):
-        if k in args["optimizer"]:
-            args["optimizer"][k] = float(args["optimizer"][k])
-
-    # copy code base and config file to slurm output
-    util.save_code_dir(util.get_code_directory(), paths["job output directory"])
-    config_target_path = os.path.join(paths["job output directory"], "config.yaml")
-    shutil.copy(cmd_args.config_path, config_target_path)
-    with open(config_target_path, "a") as f:
-        f.write(f"\nrun id: {run_id}")
-
-    # set random seed
-    np.random.seed(args["random seed"])
-    torch.manual_seed(args["random seed"])
-    if args["fixed input size"] is True:
-        torch.backends.cudnn.benchmark = True
-
-    # if dataset == "MNIST grid":
-    #     dataset = mnist.get_multi_mnist()
-    dataset = mnist.get_multi_mnist()
     dataloaders = util.get_dataloaders(dataset, batch_size=args["data loading"]["batch size"])
 
     if args["network"]["type"] in ["adversarial", "vanilla"]:
-        network = get_adv_sprelnet(net_HPs=args["network"], dataset=dataset)
-
-        train_sprelnet(paths=args["paths"],
-            loss_settings=args["loss"], optimizer_settings=args["optimizer"],
-            dataloaders=dataloaders, network=network, dataset=dataset)
-
+        get_net_fxn = get_adv_sprelnet
+        train_fxn = train_main_relnet
     elif args["network"]["type"] == "unet":
-        network = get_unet(net_HPs=args["network"], dataset=dataset)
-
-        train_unet(paths=args["paths"],
-            loss_settings=args["loss"], optimizer_settings=args["optimizer"],
-            dataloaders=dataloaders, network=network, dataset=dataset)
-
-    elif args["network"]["type"] == "relations":
-        network = get_relnet(net_HPs=args["network"], dataset=dataset)
-
-        train_unet(paths=args["paths"],
-            loss_settings=args["loss"], optimizer_settings=args["optimizer"],
-            dataloaders=dataloaders, network=network, dataset=dataset)
-
+        get_net_fxn = get_unet
+        train_fxn = train_unet
+    elif args["network"]["type"] == "relnet only":
+        get_net_fxn = get_relnet
+        train_fxn = train_relnet
+    elif args["network"]["type"] == "contrastive":
+        get_net_fxn = get_contra_net
+        train_fxn = train_contranet
+    elif args["network"]["type"] == "iterative with attention over patch proposals":
+        get_net_fxn = get_patch_net
+        train_fxn = train_patchnet
     else:
-        raise NotImplementedError
+        raise NotImplementedError("bad network type")
+
+
+    network = get_net_fxn(net_HPs=args["network"], dataset=dataset)
+    train_fxn(paths=args["paths"],
+        loss_settings=args["loss"], optimizer_settings=args["optimizer"],
+        dataloaders=dataloaders, network=network, dataset=dataset)

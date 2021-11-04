@@ -1,15 +1,20 @@
-import os
-import dill as pickle
+import os, wandb
 import numpy as np
 import torch
 import torchvision.datasets
-import sklearn.datasets
 
 from sprelnet import util
 
 ds_folder = '/data/vision/polina/scratch/clintonw/datasets'
 mnist_ds_path = os.path.join(ds_folder, "mnist.bin")
 multi_mnist_ds_path = os.path.join(ds_folder, 'multi-MNIST/ds_instance.bin')
+
+labels_to_record = ["6 left of 7", "7 right of 7", "all 7s"]
+label_pairs_of_interest = [(0,7),(0,0),(-1,-5)]
+# pos_label_pairs=[(0,7),]
+# id_label_pairs=[(0,0),]
+# neg_label_pairs=[(-1,-5),]
+# rand_label_pairs=[(0,1),(0,2)]
 
 def get_mnist():
     dataset = torchvision.datasets.MNIST(ds_folder, train=True, download=True)
@@ -22,13 +27,17 @@ def get_mnist():
 
     return (train_images, train_labels), (test_images, test_labels)
 
-def get_multi_mnist(**kwargs):
+def get_multi_mnist(run=None, **kwargs):
     if os.path.exists(multi_mnist_ds_path):
+        if run is not None:
+            artifact = wandb.Artifact('training_data', type='dataset')
+            artifact.add_file(multi_mnist_ds_path)
+            run.log_artifact(artifact)
         return util.load_binary_file(multi_mnist_ds_path)
     else:
         return create_multi_MNIST_dataset(**kwargs)
 
-def get_multi_mnist_legend():
+def get_multi_mnist_legend(key="name"):
     relations = ["above", "left of", "right of", "below",
         #"imm. above", "imm. left of", "imm. right of", "imm. below",
         #"adjacent to", "horiz. next to", "vert. next to",
@@ -38,7 +47,14 @@ def get_multi_mnist_legend():
             f"7 {r} 7" for r in relations] + ["all 7s", "all 6s"]
     #"9 immediately above 7", "9 immediately left of 7",
     #"7 adjacent to 6", "3 adjacent to 4",
-    return {name:ix for ix,name in enumerate(label_names)}
+    if key == "name":
+        return {name:ix for ix,name in enumerate(label_names)}
+    elif key == "index" or key is None:
+        return label_names
+    elif key == "class labels":
+        return {ix+1:name for ix,name in enumerate(label_names)}
+    else:
+        raise NotImplementedError
 
 
 def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
@@ -140,14 +156,17 @@ def create_multi_MNIST_dataset(N_train=9000, N_test=1000, save_folder="default",
             dp = {"image path": img_path, "seg path":seg_path}
         new_datapoints.append(dp)
 
-    dataset = {"image size": image_size, "digits per image": n_digits,
+    dataset = {"name": "MNIST grid",
+        "image size": image_size, "digits per image": n_digits,
         "train datapoints":new_datapoints[:N_train], "train label counts":train_label_counts,
         "test datapoints":new_datapoints[N_train:], "test label counts":test_label_counts,
         "legend": get_multi_mnist_legend(),
+        "datapoint loader": lambda dp: (torch.load(dp["image path"]).cuda()/255.,
+            torch.load(dp["seg path"]).float().cuda())
     }
     if save_folder is not None:
-        dataset["datapoint loader"] = lambda dp: (torch.load(dp["image path"]).cuda()/255., torch.load(dp["seg path"]).float().cuda())
         util.save_binary_file(data=dataset, path=multi_mnist_ds_path)
+    
 
     return dataset
 

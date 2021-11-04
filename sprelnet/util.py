@@ -1,45 +1,91 @@
-import os, glob, yaml, zipfile, shutil
+import os, glob, yaml, zipfile, shutil, wandb, subprocess
 import dill as pickle
 import numpy as np
 import torch
 nn = torch.nn
 F = nn.functional
 
-# BDD_CLASSES = [
-#     'road', 'sidewalk', 'building', 'wall', 'fence', 'pole', 'traffic light',
-#     'traffic sign', 'vegetation', 'terrain', 'sky', 'person', 'rider', 'car',
-#     'truck', 'bus', 'train', 'motorcycle', 'bicycle', 'void'
-# ]
-# BDD_IDS = list(range(len(BDD_CLASSES) - 1)) + [255]
-# BDD_ID_MAP = {
-#     id:ndx for ndx, id in enumerate(BDD_IDS)
-# }
-# n_classes = len(BDD_CLASSES)
 base_proj_dir = "/data/vision/polina/users/clintonw/code/sprelnet"
 base_job_dir = "/data/vision/polina/users/clintonw/code/sprelnet/job_outputs"
+entity_project = "spatial_relations/main_project"
+
+def set_random_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+def get_num_labels(dataset):
+    if dataset["name"] == "MNIST grid":
+        return len(dataset["train label counts"])
+
+    elif dataset["name"] == "pixels":
+        return dataset["number of labels"]
+        
+    else:
+        raise NotImplementedError
+
+def end_slurm_jobs(jobs=None):
+    if jobs is None:
+        jobs = get_my_slurm_ids()
+    else:
+        jobs = [slurm_id for name,slurm_id in zip(get_my_slurm_jobs(), get_my_slurm_ids()) if name in jobs]
+
+    for job in jobs:
+        run_bash_cmd_with_stdout(f"scancel {job}")
+
+def run_bash_cmd_with_stdout(command, grep=None):
+    proc = subprocess.Popen(command.split(), stdout=subprocess.PIPE)
+    out_lines = [line.decode("utf-8").rstrip() for line in proc.stdout.readlines()]
+    if grep is None:
+        return out_lines
+    else:
+        return [line for line in out_lines if grep in line]
+
+def get_my_slurm_ids(ignore_name="jupyter"):
+    lines = run_bash_cmd_with_stdout("squeue", grep="clintonw")
+    lines = [line for line in lines if not ("PD" in line or ignore_name in line)]
+    slurm_ids = [line.split()[0] for line in lines]
+    return slurm_ids
+
+def get_my_slurm_jobs(ignore_name="jupyter"):
+    lines = run_bash_cmd_with_stdout("squeue", grep="clintonw")
+    lines = [line for line in lines if not ("PD" in line or ignore_name in line)]
+    slurm_ids = [line.split()[2] for line in lines]
+    return slurm_ids
+
+def rename_job(job, new_name):
+    os.rename(f"{base_job_dir}/{job}", f"{base_job_dir}/{new_name}")
+
 
 def get_code_directory():
     return f"{base_proj_dir}/sprelnet"
 
 def get_config_path_for_job(job):
-    return f"{base_job_dir}/configs/{job}"
+    return f"{base_job_dir}/{job}/config.yaml"
 
 def get_hyperparameter_for_job(hyperparameter, job):
     config_path = get_config_path_for_job(job)
-    with open(config_path, 'r') as stream:
-        args = yaml.safe_load(stream)
+    try:
+        with open(config_path, 'r') as stream:
+            args = yaml.safe_load(stream)
+    except FileNotFoundError:
+        print(f"could not find {config_path}")
+        return
     return get_nested_attr(args, hyperparameter)
 
 def get_run_id_for_job(job):
     return get_hyperparameter_for_job("run_id", job)
 
+def get_run_path_for_job(job):
+    return get_hyperparameter_for_job("run_path", job)
+
 def iou(pred_seg, gt_seg):
     with torch.no_grad():
-        return np.nan_to_num((pred_seg & gt_seg).sum(axis=(1,2)) / (pred_seg | gt_seg).sum(axis=(1,2)), 0, 0, 0)
+        return ((pred_seg & gt_seg).sum(axis=(1,2)) / (pred_seg | gt_seg).sum(axis=(1,2)))
 
 def dice(pred_seg, gt_seg):
     with torch.no_grad():
-        return np.nan_to_num(2*(pred_seg & gt_seg).sum(axis=(1,2)) / (pred_seg.sum(axis=(1,2)) + gt_seg.sum(axis=(1,2))), 0, 0, 0)
+        return (2*(pred_seg & gt_seg).sum(axis=(1,2)) / (
+            pred_seg.sum(axis=(1,2)) + gt_seg.sum(axis=(1,2))))
 
 def to_numpy(tensor):
     return tensor.detach().cpu().numpy()
@@ -57,27 +103,29 @@ def print_job_log(job_name):
     with open(path, "r") as f:
         return f.readlines()
 
-def delete_job_outputs(job_name):
+
+def delete_job_outputs(job_name=None):
     api = wandb.Api()
-    if "*" in job_name:
+    if job_name is None:
+        return delete_job_outputs("*")
+    elif "*" in job_name:
         for path in glob.glob(f"{base_job_dir}/{job_name}"):
             print(f"deleting {path}")
-            run_id = get_run_id_for_job(os.path.basename(path))
-            shutil.rmtree(path)
-            try:
-                run = api.run(f"clintonjwang/spatial_relations/{run_id}")
-                run.delete()
-            except ValueError:
-                pass
+            delete_job_outputs(os.path.basename(path))
     else:
         path = f"{base_job_dir}/{job_name}"
-        shutil.rmtree(path)
-        run_id = get_run_id_for_job(job_name)
+        
+        run_path = get_run_path_for_job(job_name)
+        if run_path is None:
+            return
         try:
-            run = api.run(f"clintonjwang/spatial_relations/{run_id}")
-            run.delete()
-        except ValueError:
+            run = api.run(run_path)
+            run.delete(delete_artifacts=True)
+        except:
             pass
+
+        shutil.rmtree(path)
+
 
 def parse_int_list(x):
     # converts string to a list of ints
@@ -87,7 +135,6 @@ def parse_int_list(x):
         return [int(x)]
     except ValueError:
         return [int(s.strip()) for s in x.split(',')]
-
 # def parse_int_or_list(x):
 #     # converts string to an int or list of ints
 #     if not isinstance(x, str):
@@ -113,19 +160,6 @@ def save_code_dir(code_dir, save_dir):
 def get_job_output_folder(job):
     return f"{base_job_dir}/{job}"
 
-# def get_losses_for_spatial_relation_net_job(job):
-#     return load_binary_file(os.path.join(get_job_output_folder(job), "losses.bin"))
-
-
-# def get_default_HPs(network_type):
-#     path = "/data/vision/polina/users/clintonw/code/sprelnet/default_HPs.yaml"
-#     with open(path, 'r') as stream:
-#         data = yaml.safe_load(stream)
-#     if "SpRelNet" in network_type:
-#         return {**data["spatial relation net"], **data[network_type]}
-#     else:
-#         return data[network_type]
-
 def save_binary_file(path, data):
     with open(path, "wb") as opened_file:
         pickle.dump(data, opened_file)
@@ -144,9 +178,6 @@ def get_dataloaders(dataset, batch_size):
 def create_dataloader_for_datapoints(datapoints, dp_loader, **kwargs):
     torch_ds = BasicDS(datapoints, dp_loader)
     return torch.utils.data.DataLoader(torch_ds, **kwargs)
-
-def sample_without_replacement(collection):
-    raise NotImplementedError
 
 
 class BasicDS(torch.utils.data.Dataset):

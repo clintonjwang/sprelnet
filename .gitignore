@@ -1,6 +1,7 @@
 job_outputs/*
 wandb/
-configs/*
+#configs/*
+#scratchpad.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

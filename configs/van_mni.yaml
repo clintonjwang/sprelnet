@@ -1,0 +1,35 @@
+paths:
+  path to initial model weights: null
+
+data loading:
+  dataset: MNIST grid
+  batch size: 4
+
+optimizer:
+  epochs: 2000
+  checkpoint frequency: 10
+  validation frequency: 10
+  G learning rate: 2e-5
+  relnet learning rate: 2e-5
+  scheduler type: null
+  # accepts null, exponential, reduce on plateau
+
+loss:
+  weights:
+    relation sparsity: 1.
+    relation smooth: 1.
+    relation score: 1.
+    cross entropy: 1.
+
+network:
+  type: vanilla
+  output semantic: Gaussian likelihood
+  relation kernel size: 9
+  number of relations: 5
+  segmenter architecture:
+    channels by depth: 1,64,64,128,64,N_L
+    kernels by depth: 7,1,5,3,3
+    pool depths: 1
+
+random seed: 0
+fixed input size: True

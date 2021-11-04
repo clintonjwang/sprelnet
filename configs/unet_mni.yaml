@@ -1,0 +1,28 @@
+paths:
+  path to initial model weights: null
+
+data loading:
+  dataset: MNIST grid
+  train fraction: 0.85
+  batch size: 4
+
+optimizer:
+  epochs: 1000
+  checkpoint frequency: 10
+  validation frequency: 10
+  learning rate: 2e-5
+  scheduler type: null
+  # accepts null, exponential, reduce on plateau
+
+loss: null
+
+network:
+  type: unet
+  channels by depth: 1,64,64,128,64,N_L
+  kernels by depth: 7,1,5,3,3
+  pool depths: 1
+
+tags:
+  - baseline
+random seed: 0
+fixed input size: True

@@ -1,12 +1,80 @@
 import wandb, json
+import torch
+import numpy as np
 from fastai.vision import *
 #from fastai.callbacks.hooks import *
 # from fastai.callback import Callback
 # from wandb.fastai import WandbCallback
 from functools import partialmethod
 
-from sprelnet import util
+from sprelnet import util, visualize
+from sprelnet.data import mnist, pixels
 
+
+def clear_runs(runs=None, filters=None):
+    api = wandb.Api()
+    if runs is not None:
+        raise NotImplementedError
+    runs = api.runs(path=util.entity_project, filters=filters)
+    for run in runs:
+        run.delete(delete_artifacts=True)
+    return runs
+
+def clear_failed_runs(runs=None):
+    return clear_runs(filters={"state":"failed"})
+
+
+def log_relnet(relnet, dataset):
+    if dataset["name"] == "MNIST grid":
+        legend = mnist.get_multi_mnist_legend(key="index")
+        for label_pair in mnist.label_pairs_of_interest:
+            mean,std = visualize.get_multiscale_likelihood_kernel_composite(relnet, *label_pair)
+            wandb.log({f"mean kernel ({legend[label_pair[0]]} -> {legend[label_pair[1]]})": wandb.Image(mean),
+                    f"std kernel ({legend[label_pair[0]]} -> {legend[label_pair[1]]})": wandb.Image(std)})
+    
+    elif dataset["name"] == "pixels":
+        mean,std = visualize.get_multiscale_likelihood_kernel_composite(relnet, 0,1)
+        wandb.log({f"mean kernel (0-1)": wandb.Image(mean),
+                f"std kernel (0-1)": wandb.Image(std)})
+        mean,std = visualize.get_multiscale_likelihood_kernel_composite(relnet, 0,2)
+        wandb.log({f"mean kernel (0-2)": wandb.Image(mean),
+                f"std kernel (0-2)": wandb.Image(std)})
+
+    else:
+        raise NotImplementedError
+
+def log_sample_outputs(x, y_gt, y_hat, dataset, name="mask image", label_subset=None, **kwargs):
+    if dataset["name"] == "MNIST grid":
+        class_labels = mnist.get_multi_mnist_legend(key="class labels")
+    elif dataset["name"] == "pixels":
+        class_labels = pixels.class_labels
+    else:
+        raise NotImplementedError
+
+    wandb.log({name: to_wandb_seg(x, y_gt, class_labels=class_labels, label_subset=label_subset, 
+        prediction=y_hat, **kwargs)})
+    # wandb.log({"true seg":to_wandb_seg(x, y_gt, class_labels),
+    #     "predicted seg":to_wandb_seg(x, y_hat, class_labels)})
+    # x = to_wandb_img(x)
+    # y_gt = to_wandb_img(y_gt)
+    # y_hat = to_wandb_img(y_hat)
+    # wandb.log({"img":x, "true seg":y_gt, "predicted seg":y_hat})
+
+def to_wandb_seg(x, seg, class_labels=None, label_subset=None, **kwargs):
+    if label_subset is None:
+        label_subset = list(range(len(seg)))
+
+    kwargs["ground_truth"] = seg
+    mask_kw = {}
+    for key,img in kwargs.items():
+        img = util.to_numpy(img)
+        flatimg = np.zeros_like(img[0])
+        for fill_value, channel in enumerate(label_subset):
+            flatimg += (fill_value+1) * img[channel]
+        mask_kw[key] = {"mask_data":flatimg, "class_labels":class_labels}
+
+    x = util.to_numpy(x)
+    return wandb.Image(x, masks=mask_kw)
 
 def to_wandb_img(tensor):
     return wandb.Image(util.to_numpy(tensor))
