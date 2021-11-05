@@ -11,8 +11,6 @@ from sprelnet.networks.unet import *
     
 def get_contra_net():
     return
-def train_contranet():
-    return
 # contrastive losses with test-time gradient ascent
 class ContrastiveSpRelNet(nn.Module):
     def __init__(self, image_size, num_labels, kernel_size=(9,9),

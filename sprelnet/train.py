@@ -11,11 +11,121 @@ from sprelnet.data import mnist, pixels
 from sprelnet.networks.relations import get_relnet
 from sprelnet.networks.unet import get_unet
 from sprelnet.networks.adversarial import get_adv_sprelnet
-from sprelnet.networks.contrastive import get_contra_net, train_contranet
-from sprelnet.networks.patch_net import get_patch_net, train_patchnet
+from sprelnet.networks.contrastive import get_contra_net
+from sprelnet.networks.patch_net import get_patch_net
 
+
+def train_patchnet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
+    batch_size = dataloaders["train"].batch_size
+    N_train = len(dataset["train datapoints"])
+    N_test = len(dataset["test datapoints"])
+    loss_weights = loss_settings["weights"]
+
+    optimizer = torch.optim.Adam(network.parameters(), lr=float(HPs["learning rate"]))
+    K = [k//2 for k in network.rel_kernel_size]
+
+    down4 = nn.AvgPool2d((4,4))
+    down2 = nn.AvgPool2d((2,2))
+
+    for epoch in range(1, HPs["max epochs"]+1):
+        network["training event"]["epoch"] = epoch
+        loss1_sum, loss2_sum = 0,0
+        n_batches = math.ceil(N_train/batch_size)
+
+        for batch in train_dataloader:
+            X,Y_gt = batch
+            Y_0 = network.init_guess(X)
+            if epoch <= optimizer_settings["phase 1 end"]:
+                Y_hat = network(X, Y_gt)
+                Y_hat = down4(Y_hat)
+                Y_0 = down4(Y_0)
+                Y_gt = down4(Y_gt)
+                # loss2 = bce_loss(Y_0, Y_gt)
+
+            elif epoch < optimizer_settings["phase 2 end"]:
+                # goes from 1 -> 0
+                a = (optimizer_settings["phase 2 end"]-epoch) / (optimizer_settings["phase 2 end"]-optimizer_settings["phase 1 end"])
+                Y_mix = a*Y_gt + (1-a)*Y_0
+                Y_hat = network(X, Y_mix)
+                for _ in range(optimizer_settings["number of refinements"]):
+                    Y_hat = network(X, Y_hat)
+                Y_hat = down2(Y_hat)
+                Y_0 = down2(Y_0)
+                Y_gt = down2(Y_gt)
+                # loss2 = bce_loss(Y_0, Y_gt) * a
+
+            else:
+                Y_hat = network(X, Y_0)
+                for _ in range(optimizer_settings["number of refinements"]):
+                    Y_hat = network(X, Y_hat)
+                # loss2 = torch.zeros(1).float().cuda()
+
+            loss1 = bce_loss(Y_hat, Y_gt)
+            loss2 = bce_loss(Y_0, Y_gt)
+            loss1_sum += loss1.item()
+            loss2_sum += loss2.item()
+            loss = loss1 + loss2 * loss_weights["init guess weight"]
+
+            loss.backward()
+            sparse_reg, smooth_reg = losses.get_single_scale_kernel_regs(relnet, loss_weights)
+            sparse_reg.backward()
+            smooth_reg.backward()
+            for i in range(network.N_L):
+                network.r_m.weight.grad[i:W.size(0):network.N_L, i, K[0],K[1]] = 0 # "mask" the inpainted patch
+
+            optimizer.step()
+
+        A("add to loss history")("final seg loss", value=loss1_sum/n_batches)
+        A("add to loss history")("init guess loss", value=loss2_sum/n_batches)
+        A("add to loss history")("sparse kernel regularization", value=sparse_reg.item())
+        A("add to loss history")("smooth kernel regularization", value=smooth_reg.item())
+        A("speak loss history")(phase="training")
+
+        # deprecate
+        if True:
+            train_loss = {
+                "final seg loss": loss1_sum/n_batches,
+                "init guess loss": loss2_sum/n_batches,
+                "sparse kernel regularization": sparse_reg.item(),
+                "smooth kernel regularization": smooth_reg.item(),
+            }
+            s = f"Epoch {epoch}..."
+            s += ", ".join([f"{loss} {value:.3f}" for loss, value in train_loss.items()])
+            A("speak")(s)
+
+            for k,v in train_loss.items():
+                train_losses[k].append(v)
+
+        if epoch % HPs["validation frequency"] == 0:
+            network.eval()
+            loss_sum = 0
+            n_batches = math.ceil(N_test/batch_size)
+            for batch in test_dataloader:
+                X,Y_gt = batch
+                Y_hat = network(X)
+                for _ in range(optimizer_settings["number of refinements"]):
+                    Y_hat = network(X, Y_hat)
+                loss = bce_loss(Y_hat, Y_gt)
+                loss_sum += loss.item()
+            test_loss = loss_sum/n_batches
+
+            # deprecate
+            if True:
+                A("speak")(f"       ...test loss {test_loss:.3f}")
+                test_losses.append(test_loss)
+
+            network.train()
+
+        if epoch % optimizer_settings["checkpoint frequency"] == 0:
+            wab.save_state(network, paths, run, model_artifact)
+    wab.save_state(network, paths, run, model_artifact)
+
+def train_contranet():
+    return
 
 def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
+    # learns spatial relations and segmentation task simultaneously
+    
     G = network.G
     relnet = network.relnet
     if network.type == "adversarial":
@@ -40,61 +150,58 @@ def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloa
     if network.type == "adversarial":
         loss_names += ["-log pxy true", "-log pxy fake"]
 
-    train_losses = {
-        k:[] for k in loss_names
-    }
-    test_losses = []
+    model_artifact = wandb.Artifact("sprelnet", type="model", description="segmenter with spatial relations")
+    model_artifact.add_dir(paths["model weights directory"])
 
-    # static regularizers
-    K = [k//2 for k in relnet.kernel_size]
     for epoch in range(1, optimizer_settings["epochs"]+1):
         pxy_true_sum, pxy_fake_sum, rel_true_sum, rel_fake_sum, seg_loss_sum = 0,0, 0,0, 0
         n_batches = math.ceil(N_train/batch_size)
+        rel_weight = losses.determine_loss_weight("relation score", epoch=epoch, loss_settings=loss_settings)
 
         for batch in dataloaders["train"]:
             X,Y_gt = batch
             Y_logits = G(X)
-            Y_hat = torch.sigmoid(Y_logits)
+            seg_loss = bce_loss(Y_logits, Y_gt)
 
+            Y_hat = torch.sigmoid(Y_logits)
             if network.type == "adversarial":
                 p_xy_fake = D(X, Y_hat).mean()
                 pxy_fake_sum += p_xy_fake.item()
 
-            rel_fake = relnet(Y_hat).mean() * loss_weights["relation score"]
-            seg_loss = bce_loss(Y_logits, Y_gt) * loss_weights["cross entropy"]
+            rel_fake = relnet(Y_hat).mean()
+            rel_fake_sum += rel_fake.item()
+            seg_loss_sum += seg_loss.item()
+
+            if network.type == "adversarial":
+                G_loss = seg_loss * loss_weights["cross entropy"] + rel_fake * rel_weight - p_xy_fake
+            else:
+                G_loss = seg_loss * loss_weights["cross entropy"] + rel_fake * rel_weight
 
             G_optim.zero_grad()
-            if network.type == "adversarial":
-                G_loss = seg_loss + rel_fake - p_xy_fake
-            else:
-                G_loss = seg_loss + rel_fake
             G_loss.backward(retain_graph=True)
             G_optim.step()
 
-            rel_fake_sum += rel_fake.item()
-            seg_loss_sum += seg_loss.item()
+
 
 
             if network.type == "adversarial":
                 p_xy_true = D(X, Y_gt).mean()
                 p_xy_fake = D(X, Y_hat.detach()).mean()
                 pxy_true_sum += p_xy_true.item()
-
             rel_true = relnet(Y_gt).mean() * loss_weights["relation score"]
             rel_true_sum += rel_true.item()
 
-            DR_optim.zero_grad()
             if network.type == "adversarial":
                 DR_loss = p_xy_fake - p_xy_true + rel_true
             else:
                 DR_loss = rel_true
+
+            DR_optim.zero_grad()
             DR_loss.backward()
             sparse_reg, smooth_reg = losses.get_multiscale_kernel_regs(relnet, loss_weights)
             sparse_reg.backward()
             smooth_reg.backward()
-            for i in range(network.N_L):
-                for r_m in relnet.pyramid:
-                    r_m.weight.grad[i, i, K[0],K[1]] = 0 # "mask" the inpainted patch
+            util.mask_identity_grad_in_kernel(relnet)
             DR_optim.step()
 
 
@@ -109,8 +216,6 @@ def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloa
             train_loss["-log pxy true"] = -pxy_true_sum/n_batches
             train_loss["-log pxy fake"] = -pxy_fake_sum/n_batches
         wandb.log(train_loss)
-        for k,v in train_loss.items():
-            train_losses[k].append(v)
 
         if epoch % optimizer_settings["validation frequency"] == 0:
             wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="training 1")
@@ -121,32 +226,31 @@ def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloa
             wab.log_relnet(relnet, dataset)
             loss_sum = 0
             n_batches = math.ceil(N_test/batch_size)
+            dices = []
             for batch in dataloaders["test"]:
                 X,Y_gt = batch
                 Y_logits = G(X)
                 loss = bce_loss(Y_logits, Y_gt)
                 loss_sum += loss.item()
-            test_loss = loss_sum/n_batches
+                dices.append(losses.dice(Y_hat > .5, Y_gt > .5))
 
-            wandb.log({"test loss": test_loss})
+            mean_dice = torch.cat(dices, dim=0).mean()
+            wandb.log({"test loss": loss_sum/n_batches,
+                "test dice": mean_dice})
+            #wab.log_metrics("test loss", "test dice")
             wab.log_sample_outputs(X[0], Y_gt[0], torch.sigmoid(Y_logits[0]), dataset=dataset, name="validation 1")
             wab.log_sample_outputs(X[1], Y_gt[1], torch.sigmoid(Y_logits[1]), dataset=dataset, name="validation 2")
 
             network.train()
 
-        # if epoch % optimizer_settings["checkpoint frequency"] == 0:
-        #     torch.save(network.state_dict(),
-        #         os.path.join(paths["model weights directory"], f"{epoch}.state"))
-        #     util.save_binary_file(data=network,
-        #         path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
-
-    # loss_dict = {"train losses":train_losses, "test losses":test_losses}
-    # torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"{epoch}.state"))
-    # util.save_binary_file(data=network, path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
-    # return results
+        if epoch % optimizer_settings["checkpoint frequency"] == 0:
+            wab.save_state(network, paths, run, model_artifact)
+    wab.save_state(network, paths, run, model_artifact)
 
 
 def train_relnet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
+    # spatial relations only, no segmentations
+    
     batch_size = dataloaders["train"].batch_size
     N_train = len(dataset["train datapoints"])
     N_test = len(dataset["test datapoints"])
@@ -158,8 +262,10 @@ def train_relnet(paths, loss_settings, optimizer_settings, network, dataloaders,
         "relation loss": [],
     }
     test_losses = []
-    best_dice = 0
     relnet = network
+    model_artifact = wandb.Artifact("relnet", type="model", description="segmenter with spatial relations")
+    model_artifact.add_dir(paths["model weights directory"])
+
     for epoch in range(1, optimizer_settings["epochs"]+1):
         loss_sum = 0
         n_batches = math.ceil(N_train/batch_size)
@@ -175,23 +281,30 @@ def train_relnet(paths, loss_settings, optimizer_settings, network, dataloaders,
             sparse_reg, smooth_reg = losses.get_multiscale_kernel_regs(network, loss_weights)
             sparse_reg.backward()
             smooth_reg.backward()
-
+            util.mask_identity_grad_in_kernel(network)
             optimizer.step()
 
-        train_loss = {
+        wandb.log({
             "relation loss": loss_sum/n_batches,
             "sparse reg": sparse_reg.item(),
             "smooth reg": smooth_reg.item(),
-        }
-        wandb.log(train_loss)
+        })
 
         if epoch % optimizer_settings["validation frequency"] == 0:
             network.eval()
             wab.log_relnet(network, dataset)
             network.train()
 
+        if epoch % optimizer_settings["checkpoint frequency"] == 0:
+            wab.save_state(network, paths, run, model_artifact)
+    
+    wab.save_state(network, paths, run, model_artifact)
+
+
 
 def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
+    # standard segmentation U-Net with no spatial relations
+
     batch_size = dataloaders["train"].batch_size
     N_train = len(dataset["train datapoints"])
     N_test = len(dataset["test datapoints"])
@@ -199,10 +312,9 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
 
     optimizer = torch.optim.Adam(network.parameters(), lr=float(optimizer_settings["learning rate"]))
 
-    train_losses = {
-        "bce": [],
-    }
-    test_losses = []
+    model_artifact = wandb.Artifact("baseline", type="model", description="segmenter with spatial relations")
+    model_artifact.add_dir(paths["model weights directory"])
+
     best_dice = 0
     for epoch in range(1, optimizer_settings["epochs"]+1):
         loss_sum = 0
@@ -221,8 +333,6 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
             "bce": loss_sum/n_batches,
         }
         wandb.log(train_loss)
-        for k,v in train_loss.items():
-            train_losses[k].append(v)
 
         if epoch % optimizer_settings["validation frequency"] == 0:
             network.eval()
@@ -248,7 +358,7 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
                 loss_sum += loss.item()
                 Y_hat = torch.sigmoid(Y_logits)
 
-                dices.append(util.dice(Y_hat > .5, Y_gt > .5))
+                dices.append(losses.dice(Y_hat > .5, Y_gt > .5))
 
                 # img = wab.to_wandb_img(X[0])
                 # row = [img]
@@ -259,7 +369,7 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
                 #     label_ix = legend[label]
                 #     gt_seg = wab.to_wandb_img(Y_gt[0,label_ix])
                 #     pred_seg = wab.to_wandb_img(Y_hat[0,label_ix])
-                #     iou = util.iou(pred_seg > .5, gt_seg > .5)
+                #     iou = losses.iou(pred_seg > .5, gt_seg > .5)
                 #     row += [gt_seg, pred_seg, iou]
                 # table.add_data(*row)
 
@@ -269,24 +379,14 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
 
             test_loss = loss_sum/n_batches
             test_losses.append(test_loss)
-            wandb.log({"test loss": test_loss})
+            wandb.log({"test loss": test_loss, "test dice": mean_dice})
             wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="validation 1")
             wab.log_sample_outputs(X[1], Y_gt[1], Y_hat[1], dataset=dataset, name="validation 2")
             network.train()
 
-        # if epoch % optimizer_settings["checkpoint frequency"] == 0:
-        #     torch.save(network.state_dict(),
-        #         os.path.join(paths["model weights directory"], f"{epoch}.state"))
-        #     util.save_binary_file(data=network,
-        #         path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
-
-    # losses = {"train losses":train_losses, "test losses":test_losses}
-    # torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"{epoch}.state"))
-    # util.save_binary_file(data=network, path=os.path.join(paths["model weights directory"], f"{epoch}.inst"))
-    # results = {"dataset": dataset, "model":network.eval(), "losses": losses}
-    # util.save_binary_file(data=results, path=os.path.join("network histories folder", f"{job_name}.bin"))
-    # return results
-
+        if epoch % optimizer_settings["checkpoint frequency"] == 0:
+            wab.save_state(network, paths, run, model_artifact)
+    wab.save_state(network, paths, run, model_artifact)
 
 def prep_run(cmd_args, args):    
     if "tags" not in args:
@@ -301,9 +401,9 @@ def prep_run(cmd_args, args):
     paths = args["paths"]
     paths["job output directory"] = util.get_job_output_folder(cmd_args.job_id)
     # paths["loss history path"] = os.path.join(paths["job output directory"], "losses.bin")
-    # paths["model weights directory"] = os.path.join(paths["job output directory"], "models")
-    # if not os.path.exists(paths["model weights directory"]):
-    #     os.makedirs(paths["model weights directory"])
+    paths["model weights directory"] = os.path.join(paths["job output directory"], "models")
+    if not os.path.exists(paths["model weights directory"]):
+        os.makedirs(paths["model weights directory"])
 
     for k in ("learning rate", "D learning rate", "G learning rate"):
         if k in args["optimizer"]:

@@ -12,25 +12,10 @@ from sprelnet import util
 #     plt.colorbar()
 #     ax.set_axis_off()
 #     if return_array is True:
-#         array = A("get figure as array")(fig, height=A("get height")(pixels))
+#         array = get_figure_as_array(fig, height=pixels.height)
 #         fig.set_visible(False)
 #         return array
 #     return ax
-
-def run_iterative_sprelnet_on_dp(seg, dp, n_iters=1000, dataset=None):
-    if dataset is None:
-        dataset = mnist.get_multi_mnist()
-    X, Y_gt = dataset["datapoint loader"](dp)
-    seg.eval()
-    fixY = lambda y: torch.sigmoid(y.detach()).squeeze(0).cpu()
-    X.unsqueeze_(0)
-    Y_0 = seg.init_guess(X)
-    y_0 = fixY(Y_0)
-    Y = seg(X, Y_0=Y_0, n_iters=n_iters)
-
-    return {"gt": (X.cpu(), Y_gt.cpu()),
-        "outputs": (y_0, fixY(Y))}
-
 
 def get_multiscale_kernel_composite(relnet, label1, label2):
     kernels = []
@@ -41,14 +26,19 @@ def get_multiscale_kernel_composite(relnet, label1, label2):
         kernels.append(K)
     w,h = max_size = K.shape
     composite = K
-    composite[w//4:(3*w)//4, h//4:(3*h)//4] += kernels[-2]
-    composite[3*w//8:(5*w)//8, 3*h//8:(5*h)//8] += kernels[-3]
-    composite[7*w//16:(9*w)//16, 7*h//16:(9*h)//16] += kernels[-4]
+
+    for lvl in range(1, len(kernels)):
+        d = 2**(lvl+1)
+        di = 2**lvl - 1
+        lw, lh = (di*w)//d, (di*h)//d
+        dw, dh = kernels[-lvl-1].shape
+        composite[lw:lw+dw, lh:lh+dh] += kernels[-lvl-1]
 
     return composite
 
 
 def get_multiscale_likelihood_kernel_composite(relnet, label1, label2):
+    # flatten/stack the kernel pyramid at the appropriate scale
     mean_kernels, stdev_kernels = [], []
     for lvl, r_m in enumerate(relnet.pyramid):
         W = r_m.weight.clone().cpu().detach()
@@ -76,63 +66,75 @@ def get_multiscale_likelihood_kernel_composite(relnet, label1, label2):
     for lvl in range(1, len(mean_kernels)):
         d = 2**(lvl+1)
         di = 2**lvl - 1
-        #dj = 2**lvl + 1
         lw, lh = (di*w)//d, (di*h)//d
         dw, dh = mean_kernels[-lvl-1].shape
         mean_composite[lw:lw+dw, lh:lh+dh] += mean_kernels[-lvl-1]
         stdev_composite[lw:lw+dw, lh:lh+dh] += stdev_kernels[-lvl-1]
-        # mean_composite[(di*w)//d:(dj*w)//d, (di*h)//d:(dj*h)//d] += mean_kernels[lvl]
-        # stdev_composite[(di*w)//d:(dj*w)//d, (di*h)//d:(dj*h)//d] += stdev_kernels[lvl]
 
     return mean_composite, stdev_composite
 
 
-def visualize_relations(seg, label1, label2, vmax=None, dataset=None):
-    kernels = []
-    for r_m in seg.rel_pyr.pyramid:
-        W = r_m.weight.clone().cpu().detach()
-        kernels.append(W[label1, label2])
-    if vmax is None:
-        draw_images_with_colorbar(kernels, padding=1)
-    else:
-        draw_images_with_colorbar(kernels, padding=1, vmax=vmax, vmin=-vmax)
 
-    if dataset is not None:
-        if dataset["name"] == "MNIST grid":
-            label_names = list(dataset["train label counts"].keys())
-            A("set plot title")(f'"{label_names[label1]}" is more likely if "{label_names[label2]}"\nis observed in this relative position', case="lower")
-        else:
-            print("TBD")
-    return kernels
-
-
-def visualize_iterative_sprelnet_for_datapoint(seg, dp, iters=(100,500,1000),
-        label_to_draw=1, dataset=None):
+def run_iterative_sprelnet_on_dp(seg, dp, n_iters=1000, dataset=None):
+    if dataset is None:
+        dataset = mnist.get_multi_mnist()
     X, Y_gt = dataset["datapoint loader"](dp)
-    X.unsqueeze_(0)
     seg.eval()
     fixY = lambda y: torch.sigmoid(y.detach()).squeeze(0).cpu()
+    X.unsqueeze_(0)
     Y_0 = seg.init_guess(X)
-    Y = nn.Parameter(Y_0)
-    optim = torch.optim.Adam([Y], lr=.05)
-    best_Y = Y_0
-    best_loss = np.inf
-    Y_0 = fixY(torch.clone(Y_0))
-    Ys = []
-    losses = []
-    for cur_iter in range(iters[-1]):
-        loss = seg.get_test_loss(X, Y)
-        if best_loss > loss.item():
-            best_loss = loss.item()
-            best_Y = Y.data
-        if cur_iter+1 in iters:
-            Ys.append(fixY(Y.data))
-            losses.append(loss.item())
-        loss.backward()
-        optim.step()
-    Ys = (Y_0, *Ys, fixY(best_Y))
-    losses.append(best_loss)
-    draw_images_with_colorbar([y[label_to_draw] for y in Ys])
+    y_0 = fixY(Y_0)
+    Y = seg(X, Y_0=Y_0, n_iters=n_iters)
+
     return {"gt": (X.cpu(), Y_gt.cpu()),
-        "outputs": Ys,
-        "losses": losses}
+        "outputs": (y_0, fixY(Y))}
+
+# def visualize_relations(seg, label1, label2, vmax=None, dataset=None):
+#     kernels = []
+#     for r_m in seg.rel_pyr.pyramid:
+#         W = r_m.weight.clone().cpu().detach()
+#         kernels.append(W[label1, label2])
+#     if vmax is None:
+#         draw_images_with_colorbar(kernels, padding=1)
+#     else:
+#         draw_images_with_colorbar(kernels, padding=1, vmax=vmax, vmin=-vmax)
+
+#     if dataset is not None:
+#         if dataset["name"] == "MNIST grid":
+#             label_names = list(dataset["train label counts"].keys())
+#             A("set plot title")(f'"{label_names[label1]}" is more likely if "{label_names[label2]}"\nis observed in this relative position', case="lower")
+#         else:
+#             print("TBD")
+#     return kernels
+
+
+# def visualize_iterative_sprelnet_for_datapoint(seg, dp, iters=(100,500,1000),
+#         label_to_draw=1, dataset=None):
+#     X, Y_gt = dataset["datapoint loader"](dp)
+#     X.unsqueeze_(0)
+#     seg.eval()
+#     fixY = lambda y: torch.sigmoid(y.detach()).squeeze(0).cpu()
+#     Y_0 = seg.init_guess(X)
+#     Y = nn.Parameter(Y_0)
+#     optim = torch.optim.Adam([Y], lr=.05)
+#     best_Y = Y_0
+#     best_loss = np.inf
+#     Y_0 = fixY(torch.clone(Y_0))
+#     Ys = []
+#     losses = []
+#     for cur_iter in range(iters[-1]):
+#         loss = seg.get_test_loss(X, Y)
+#         if best_loss > loss.item():
+#             best_loss = loss.item()
+#             best_Y = Y.data
+#         if cur_iter+1 in iters:
+#             Ys.append(fixY(Y.data))
+#             losses.append(loss.item())
+#         loss.backward()
+#         optim.step()
+#     Ys = (Y_0, *Ys, fixY(best_Y))
+#     losses.append(best_loss)
+#     draw_images_with_colorbar([y[label_to_draw] for y in Ys])
+#     return {"gt": (X.cpu(), Y_gt.cpu()),
+#         "outputs": Ys,
+#         "losses": losses}

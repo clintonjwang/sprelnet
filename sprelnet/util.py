@@ -78,15 +78,6 @@ def get_run_id_for_job(job):
 def get_run_path_for_job(job):
     return get_hyperparameter_for_job("run_path", job)
 
-def iou(pred_seg, gt_seg):
-    with torch.no_grad():
-        return ((pred_seg & gt_seg).sum(axis=(1,2)) / (pred_seg | gt_seg).sum(axis=(1,2)))
-
-def dice(pred_seg, gt_seg):
-    with torch.no_grad():
-        return (2*(pred_seg & gt_seg).sum(axis=(1,2)) / (
-            pred_seg.sum(axis=(1,2)) + gt_seg.sum(axis=(1,2))))
-
 def to_numpy(tensor):
     return tensor.detach().cpu().numpy()
 
@@ -178,6 +169,12 @@ def get_dataloaders(dataset, batch_size):
 def create_dataloader_for_datapoints(datapoints, dp_loader, **kwargs):
     torch_ds = BasicDS(datapoints, dp_loader)
     return torch.utils.data.DataLoader(torch_ds, **kwargs)
+
+def mask_identity_grad_in_kernel(relnet):
+    K_center = [k//2 for k in relnet.kernel_size]
+    for i in range(relnet.N_L):
+        for r_m in relnet.pyramid:
+            r_m.weight.grad[i, i, K_center[0],K_center[1]] = 0 # "mask" the inpainted patch
 
 
 class BasicDS(torch.utils.data.Dataset):

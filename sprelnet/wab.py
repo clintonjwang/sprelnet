@@ -1,3 +1,4 @@
+import os
 import wandb, json
 import torch
 import numpy as np
@@ -11,10 +12,17 @@ from sprelnet import util, visualize
 from sprelnet.data import mnist, pixels
 
 
+def save_state(network, paths, run, model_artifact):
+    torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"weights.state"))
+    run.log_artifact(model_artifact)
+
 def clear_runs(runs=None, filters=None):
+    if runs is None and filters is None:
+        raise ValueError("clearing all WAndB runs is a dangerous action!")
+
     api = wandb.Api()
     if runs is not None:
-        raise NotImplementedError
+        raise NotImplementedError()
     runs = api.runs(path=util.entity_project, filters=filters)
     for run in runs:
         run.delete(delete_artifacts=True)
@@ -25,6 +33,7 @@ def clear_failed_runs(runs=None):
 
 
 def log_relnet(relnet, dataset):
+    # log kernels
     if dataset["name"] == "MNIST grid":
         legend = mnist.get_multi_mnist_legend(key="index")
         for label_pair in mnist.label_pairs_of_interest:
@@ -42,6 +51,7 @@ def log_relnet(relnet, dataset):
 
     else:
         raise NotImplementedError
+
 
 def log_sample_outputs(x, y_gt, y_hat, dataset, name="mask image", label_subset=None, **kwargs):
     if dataset["name"] == "MNIST grid":
@@ -64,7 +74,10 @@ def to_wandb_seg(x, seg, class_labels=None, label_subset=None, **kwargs):
     if label_subset is None:
         label_subset = list(range(len(seg)))
 
-    kwargs["ground_truth"] = seg
+    if len(kwargs) == 0:
+        kwargs["mask"] = seg
+    else:
+        kwargs["ground_truth"] = seg
     mask_kw = {}
     for key,img in kwargs.items():
         img = util.to_numpy(img)

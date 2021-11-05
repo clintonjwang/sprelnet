@@ -11,14 +11,14 @@ def get_patch_net(net_HPs, dataset):
         "kernel_size": (net_HPs["relation kernel size"], net_HPs["relation kernel size"]),
         "num_heads": net_HPs["number of heads"],
         "num_relations": net_HPs["number of relations"],
-        "miniseg_HPs": net_HPs["segmenter architecture"],
+        "initseg_HPs": net_HPs["segmenter architecture"],
         "template_HPs": net_HPs["PatchTemplate HPs"],
     }
-    miniseg_HPs = kwargs["miniseg_HPs"]
-    if isinstance(miniseg_HPs["channels by depth"], str):
-        miniseg_HPs["channels by depth"] = miniseg_HPs["channels by depth"].replace("N_L", str(kwargs["num_labels"]))
-        for k,v in miniseg_HPs.items():
-            miniseg_HPs[k] = util.parse_int_list(v)
+    initseg_HPs = kwargs["initseg_HPs"]
+    if isinstance(initseg_HPs["channels by depth"], str):
+        initseg_HPs["channels by depth"] = initseg_HPs["channels by depth"].replace("N_L", str(kwargs["num_labels"]))
+        for k,v in initseg_HPs.items():
+            initseg_HPs[k] = util.parse_int_list(v)
 
     template_HPs = kwargs["template_HPs"]
     if isinstance(template_HPs["channels by depth"], str):
@@ -29,8 +29,6 @@ def get_patch_net(net_HPs, dataset):
     return IterPatchSpRelNet(**kwargs).cuda()
 
 
-def train_patchnet():
-    return
 
 class PatchTemplate(nn.Module):
     def __init__(self, channels_by_depth, kernels_by_depth):
@@ -57,7 +55,7 @@ class PatchTemplate(nn.Module):
 # iterative, attention over "patch proposals"
 class IterPatchSpRelNet(nn.Module):
     def __init__(self, image_size, num_labels, kernel_size=(9,9), num_heads=8,
-            num_relations=12, patch_size=(8,8), miniseg_HPs=None, template_HPs=None):
+            num_relations=12, patch_size=(8,8), initseg_HPs=None, template_HPs=None):
         super().__init__()
         if len(image_size) != 2:
             raise NotImplementedError
@@ -72,11 +70,11 @@ class IterPatchSpRelNet(nn.Module):
         self.rel_kernel_size = kernel_size
         self.image_size = image_size
 
-        if miniseg_HPs is None:
+        if initseg_HPs is None:
             self.init_guess = MiniSeg().train().cuda()
         else:
-            self.init_guess = MiniSeg(miniseg_HPs["channels by depth"],
-                    miniseg_HPs["kernels by depth"], miniseg_HPs["pool depths"]).train().cuda()
+            self.init_guess = MiniSeg(initseg_HPs["channels by depth"],
+                    initseg_HPs["kernels by depth"], initseg_HPs["pool depths"]).train().cuda()
 
         if template_HPs is None:
             self.W_V = PatchTemplate().train().cuda()
