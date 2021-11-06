@@ -3,6 +3,7 @@ import numpy as np
 import torch
 nn = torch.nn
 F = nn.functional
+import bitsandbytes as bnb
 
 torch.backends.cudnn.deterministic = True
 
@@ -21,13 +22,13 @@ def train_patchnet(paths, loss_settings, optimizer_settings, network, dataloader
     N_test = len(dataset["test datapoints"])
     loss_weights = loss_settings["weights"]
 
-    optimizer = torch.optim.Adam(network.parameters(), lr=float(HPs["learning rate"]))
+    optimizer = bnb.optim.Adam8bit(network.parameters(), lr=float(optimizer_settings["learning rate"]))
     K = [k//2 for k in network.rel_kernel_size]
 
     down4 = nn.AvgPool2d((4,4))
     down2 = nn.AvgPool2d((2,2))
 
-    for epoch in range(1, HPs["max epochs"]+1):
+    for epoch in range(1, optimizer_settings["max epochs"]+1):
         network["training event"]["epoch"] = epoch
         loss1_sum, loss2_sum = 0,0
         n_batches = math.ceil(N_train/batch_size)
@@ -75,28 +76,14 @@ def train_patchnet(paths, loss_settings, optimizer_settings, network, dataloader
 
             optimizer.step()
 
-        A("add to loss history")("final seg loss", value=loss1_sum/n_batches)
-        A("add to loss history")("init guess loss", value=loss2_sum/n_batches)
-        A("add to loss history")("sparse kernel regularization", value=sparse_reg.item())
-        A("add to loss history")("smooth kernel regularization", value=smooth_reg.item())
-        A("speak loss history")(phase="training")
+        wandb.log({
+            "final seg loss": loss1_sum/n_batches,
+            "init guess loss": loss2_sum/n_batches,
+            "sparse kernel regularization": sparse_reg.item(),
+            "smooth kernel regularization": smooth_reg.item(),
+        })
 
-        # deprecate
-        if True:
-            train_loss = {
-                "final seg loss": loss1_sum/n_batches,
-                "init guess loss": loss2_sum/n_batches,
-                "sparse kernel regularization": sparse_reg.item(),
-                "smooth kernel regularization": smooth_reg.item(),
-            }
-            s = f"Epoch {epoch}..."
-            s += ", ".join([f"{loss} {value:.3f}" for loss, value in train_loss.items()])
-            A("speak")(s)
-
-            for k,v in train_loss.items():
-                train_losses[k].append(v)
-
-        if epoch % HPs["validation frequency"] == 0:
+        if epoch % optimizer_settings["validation frequency"] == 0:
             network.eval()
             loss_sum = 0
             n_batches = math.ceil(N_test/batch_size)
@@ -109,19 +96,29 @@ def train_patchnet(paths, loss_settings, optimizer_settings, network, dataloader
                 loss_sum += loss.item()
             test_loss = loss_sum/n_batches
 
-            # deprecate
-            if True:
-                A("speak")(f"       ...test loss {test_loss:.3f}")
-                test_losses.append(test_loss)
-
             network.train()
 
         if epoch % optimizer_settings["checkpoint frequency"] == 0:
             wab.save_state(network, paths, run, model_artifact)
     wab.save_state(network, paths, run, model_artifact)
 
-def train_contranet():
-    return
+def train_contranet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
+    batch_size = dataloaders["train"].batch_size
+    N_train = len(dataset["train datapoints"])
+    N_test = len(dataset["test datapoints"])
+    loss_weights = loss_settings["weights"]
+
+    for epoch in range(1, optimizer_settings["max epochs"]+1):
+        network["training event"]["epoch"] = epoch
+        loss1_sum, loss2_sum = 0,0
+        n_batches = math.ceil(N_train/batch_size)
+
+        for batch in train_dataloader:
+            pass
+
+        if epoch % optimizer_settings["checkpoint frequency"] == 0:
+            wab.save_state(network, paths, run, model_artifact)
+    wab.save_state(network, paths, run, model_artifact)
 
 def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloaders, dataset):
     # learns spatial relations and segmentation task simultaneously
@@ -138,12 +135,12 @@ def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloa
     N_test = len(dataset["test datapoints"])
     bce_loss = losses.get_bce_loss(dataset)
 
-    G_optim = torch.optim.Adam(G.parameters(), lr=float(optimizer_settings["G learning rate"]))
+    G_optim = bnb.optim.Adam8bit(G.parameters(), lr=float(optimizer_settings["G learning rate"]))
     if network.type == "adversarial":
-        DR_optim = torch.optim.Adam(itertools.chain(relnet.parameters(), D.parameters()),
+        DR_optim = bnb.optim.Adam8bit(itertools.chain(relnet.parameters(), D.parameters()),
             lr=float(optimizer_settings["D learning rate"]))
     else:
-        DR_optim = torch.optim.Adam(relnet.parameters(), lr=float(optimizer_settings["relnet learning rate"]))
+        DR_optim = bnb.optim.Adam8bit(relnet.parameters(), lr=float(optimizer_settings["relnet learning rate"]))
 
     loss_names = ["rel true", "rel fake", "seg loss",
         "sparse kernel regularization", "smooth kernel regularization"]
@@ -218,8 +215,7 @@ def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloa
         wandb.log(train_loss)
 
         if epoch % optimizer_settings["validation frequency"] == 0:
-            wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="training 1")
-            wab.log_sample_outputs(X[1], Y_gt[1], Y_hat[1], dataset=dataset, name="training 2")
+            wab.log_sample_outputs(X, Y_gt, Y_hat, dataset=dataset, phase="training", n=2)
             
             network.eval()
 
@@ -231,16 +227,13 @@ def train_main_relnet(paths, loss_settings, optimizer_settings, network, dataloa
                 X,Y_gt = batch
                 Y_logits = G(X)
                 loss = bce_loss(Y_logits, Y_gt)
+                Y_hat = torch.sigmoid(Y_logits)
                 loss_sum += loss.item()
                 dices.append(losses.dice(Y_hat > .5, Y_gt > .5))
 
-            mean_dice = torch.cat(dices, dim=0).mean()
-            wandb.log({"test loss": loss_sum/n_batches,
-                "test dice": mean_dice})
-            #wab.log_metrics("test loss", "test dice")
-            wab.log_sample_outputs(X[0], Y_gt[0], torch.sigmoid(Y_logits[0]), dataset=dataset, name="validation 1")
-            wab.log_sample_outputs(X[1], Y_gt[1], torch.sigmoid(Y_logits[1]), dataset=dataset, name="validation 2")
-
+            wab.update_metric("loss", loss_sum/n_batches)
+            wab.update_metric("dice", torch.cat(dices, dim=0).mean())
+            wab.log_sample_outputs(X, Y_gt, Y_hat, dataset=dataset, phase="validation", n=2)
             network.train()
 
         if epoch % optimizer_settings["checkpoint frequency"] == 0:
@@ -256,12 +249,8 @@ def train_relnet(paths, loss_settings, optimizer_settings, network, dataloaders,
     N_test = len(dataset["test datapoints"])
     loss_weights = loss_settings["weights"]
 
-    optimizer = torch.optim.Adam(network.parameters(), lr=float(optimizer_settings["learning rate"]))
+    optimizer = bnb.optim.Adam8bit(network.parameters(), lr=float(optimizer_settings["learning rate"]))
 
-    train_losses = {
-        "relation loss": [],
-    }
-    test_losses = []
     relnet = network
     model_artifact = wandb.Artifact("relnet", type="model", description="segmenter with spatial relations")
     model_artifact.add_dir(paths["model weights directory"])
@@ -310,12 +299,11 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
     N_test = len(dataset["test datapoints"])
     bce_loss = losses.get_bce_loss(dataset)
 
-    optimizer = torch.optim.Adam(network.parameters(), lr=float(optimizer_settings["learning rate"]))
+    optimizer = bnb.optim.Adam8bit(network.parameters(), lr=float(optimizer_settings["learning rate"]))
 
     model_artifact = wandb.Artifact("baseline", type="model", description="segmenter with spatial relations")
     model_artifact.add_dir(paths["model weights directory"])
 
-    best_dice = 0
     for epoch in range(1, optimizer_settings["epochs"]+1):
         loss_sum = 0
         n_batches = math.ceil(N_train/batch_size)
@@ -329,26 +317,15 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
             loss.backward()
             optimizer.step()
 
-        train_loss = {
-            "bce": loss_sum/n_batches,
-        }
-        wandb.log(train_loss)
+        wandb.log({"bce": loss_sum/n_batches})
 
         if epoch % optimizer_settings["validation frequency"] == 0:
             network.eval()
             Y_hat = torch.sigmoid(Y_logits)
-            wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="training 1")
-            wab.log_sample_outputs(X[1], Y_gt[1], Y_hat[1], dataset=dataset, name="training 2")
+            wab.log_sample_outputs(X, Y_gt, Y_hat, dataset=dataset, phase="training", n=2)
 
             loss_sum = 0
             n_batches = math.ceil(N_test/batch_size)
-
-            # columns = ["image"]
-            # if dataset["name"] != "MNIST grid":
-            #     raise NotImplementedError("labels_to_record for non MNIST")
-            # for label in mnist.labels_to_record:
-            #     columns += [f"GT seg ({label})", f"predicted seg ({label})", f"IOU ({label})"]
-            # table = wandb.Table(columns=columns)
 
             dices = []
             for batch in dataloaders["test"]:
@@ -360,33 +337,17 @@ def train_unet(paths, loss_settings, optimizer_settings, network, dataloaders, d
 
                 dices.append(losses.dice(Y_hat > .5, Y_gt > .5))
 
-                # img = wab.to_wandb_img(X[0])
-                # row = [img]
-                # if dataset["name"] != "MNIST grid":
-                #     raise NotImplementedError("labels_to_record for non MNIST")
-                # for label in mnist.labels_to_record:
-                #     legend = mnist.get_multi_mnist_legend()
-                #     label_ix = legend[label]
-                #     gt_seg = wab.to_wandb_img(Y_gt[0,label_ix])
-                #     pred_seg = wab.to_wandb_img(Y_hat[0,label_ix])
-                #     iou = losses.iou(pred_seg > .5, gt_seg > .5)
-                #     row += [gt_seg, pred_seg, iou]
-                # table.add_data(*row)
+            wab.update_metric("dice", torch.cat(dices, dim=0).mean())
+            wab.update_metric("loss", loss_sum/n_batches)
 
-            mean_dice = torch.cat(dices, dim=0).mean()
-            if mean_dice > best_dice:
-                run.summary["best_dice"] = best_dice = mean_dice
-
-            test_loss = loss_sum/n_batches
-            test_losses.append(test_loss)
-            wandb.log({"test loss": test_loss, "test dice": mean_dice})
-            wab.log_sample_outputs(X[0], Y_gt[0], Y_hat[0], dataset=dataset, name="validation 1")
-            wab.log_sample_outputs(X[1], Y_gt[1], Y_hat[1], dataset=dataset, name="validation 2")
+            wab.log_sample_outputs(X, Y_gt, Y_hat, dataset=dataset, phase="validation", n=2)
             network.train()
 
         if epoch % optimizer_settings["checkpoint frequency"] == 0:
             wab.save_state(network, paths, run, model_artifact)
     wab.save_state(network, paths, run, model_artifact)
+
+
 
 def prep_run(cmd_args, args):    
     if "tags" not in args:
@@ -404,10 +365,6 @@ def prep_run(cmd_args, args):
     paths["model weights directory"] = os.path.join(paths["job output directory"], "models")
     if not os.path.exists(paths["model weights directory"]):
         os.makedirs(paths["model weights directory"])
-
-    for k in ("learning rate", "D learning rate", "G learning rate"):
-        if k in args["optimizer"]:
-            args["optimizer"][k] = float(args["optimizer"][k])
 
     # copy code base and config file to slurm output
     # util.save_code_dir(util.get_code_directory(), paths["job output directory"])

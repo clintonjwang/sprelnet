@@ -3,7 +3,6 @@ paths:
 
 data loading:
   dataset: pixels
-  train fraction: 0.85
   batch size: 64
 
 optimizer:

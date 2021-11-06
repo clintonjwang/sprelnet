@@ -1,1 +1,22 @@
 # sprelnet
+- configs: yaml files for each job
+- sprelnet: code directory
+  - script_train.sh: run like "sh script_train.sh {job_name}" - job_name has to have a config file
+  - train.py: training loops for each type of network
+  - infer.py: load trained models and run on test set
+  - losses.py: loss functions
+  - util.py: I/O, job management, etc.
+  - vision.py: image operations (padding, etc.)
+  - visualize.py: custom figures for W&B
+  - wab.py: weights and biases integration
+  - data/
+    - pixels.py: first label is random pixels highlighted on a black background, subsequent labels are at fixed offsets of the first label
+    - mnist.py: grid of MNIST digits, most labels are generated based on neighboring digits
+  - networks/
+  	- relations: nn.Modules for representing spatial relations, does not segment
+  	- unet: U-Net segmenter, does not represent spatial relations
+  	- adversarial: adds discriminator on predicted segmentations
+  	- denoiser: adds denoiser on predicted segmentations
+  	- contrastive: contrasts matched/random image-seg pairs
+  	- attention: attention-based segmenter
+  	- patch_net: weights "patch proposals" based on spatial relations

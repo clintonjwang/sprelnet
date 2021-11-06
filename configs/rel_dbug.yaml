@@ -3,7 +3,6 @@ paths:
 
 data loading:
   dataset: MNIST grid
-  train fraction: 0.85
   batch size: 16
 
 optimizer:

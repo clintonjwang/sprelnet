@@ -1,7 +1,9 @@
+import numpy as np
 import torch
 nn = torch.nn
 F = nn.functional
 
+from sprelnet import util
 
 def get_attn_net(net_HPs, dataset):
     kwargs = {

@@ -11,6 +11,40 @@ from functools import partialmethod
 from sprelnet import util, visualize
 from sprelnet.data import mnist, pixels
 
+# columns = ["image"]
+# if dataset["name"] != "MNIST grid":
+#     raise NotImplementedError("labels_to_record for non MNIST")
+# for label in mnist.labels_to_record:
+#     columns += [f"GT seg ({label})", f"predicted seg ({label})", f"IOU ({label})"]
+# table = wandb.Table(columns=columns)
+
+# img = to_wandb_img(X[0])
+# row = [img]
+# if dataset["name"] != "MNIST grid":
+#     raise NotImplementedError("labels_to_record for non MNIST")
+# for label in mnist.labels_to_record:
+#     legend = mnist.get_multi_mnist_legend()
+#     label_ix = legend[label]
+#     gt_seg = to_wandb_img(Y_gt[0,label_ix])
+#     pred_seg = to_wandb_img(Y_hat[0,label_ix])
+#     iou = losses.iou(pred_seg > .5, gt_seg > .5)
+#     row += [gt_seg, pred_seg, iou]
+# table.add_data(*row)
+
+def update_metric(metric, value):
+    key = f"best {metric}"
+    if key in run.summary:
+        if metric in ["dice"]:
+            if value > run.summary[key]:
+                run.summary[key] = value
+        elif metric in ["loss"]:
+            if value < run.summary[key]:
+                run.summary[key] = value
+        else:
+            raise NotImplementedError(f"cannot handle metric '{metric}'")
+    else:
+        run.summary[key] = value
+    wandb.log({f"test {metric}": value})
 
 def save_state(network, paths, run, model_artifact):
     torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"weights.state"))
@@ -53,7 +87,11 @@ def log_relnet(relnet, dataset):
         raise NotImplementedError
 
 
-def log_sample_outputs(x, y_gt, y_hat, dataset, name="mask image", label_subset=None, **kwargs):
+def log_sample_outputs(X, Y_gt, Y_hat, dataset, phase, n):
+    for i in range(n):
+        log_mask_img(X[i], Y_gt[i], Y_hat[i], dataset=dataset, name=f"{phase} {i+1}")
+
+def log_mask_img(x, y_gt, y_hat, dataset, name="mask image", label_subset=None, **kwargs):
     if dataset["name"] == "MNIST grid":
         class_labels = mnist.get_multi_mnist_legend(key="class labels")
     elif dataset["name"] == "pixels":

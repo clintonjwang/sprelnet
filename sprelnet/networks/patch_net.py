@@ -1,7 +1,11 @@
+import math, einops
+import numpy as np
 import torch
 nn = torch.nn
 F = nn.functional
 
+from sprelnet import util, vision
+from sprelnet.networks.unet import MiniSeg
 
 def get_patch_net(net_HPs, dataset):
     kwargs = {
@@ -52,6 +56,37 @@ class PatchTemplate(nn.Module):
     def forward(self, X):
         return self.layers(X)
 
+
+def torch_img_to_patch_2d(image, patch_size, flattened=False): # (batch, channel, x,y)
+    x = vision.pad_to_multiple(image, patch_size)
+    x = x.unfold(3, patch_size[1], patch_size[1]) # (batch, channel, x, y_token, y_pixel)
+    x = x.unfold(2, patch_size[0], patch_size[0]) # (batch, channel, x_token, y_token, y_pixel, x_pixel)
+    if flattened:
+        patches = einops.rearrange(x, 'b c xt yt yp xp -> b c (xt yt) (xp yp)') # (batch, channel, token, pixel)
+    else:
+        patches = einops.rearrange(x, 'b c xt yt yp xp -> b c (xt yt) xp yp')
+    # kh, kw = patch_size
+    # x = x.unfold(-2, kh, kh).unfold(-1, kw, kw)
+    # patches = x.contiguous().view(*image.shape[:-2], kh*kw)
+    return patches
+
+def torch_patch_to_img_2d(patches, image_size): # (batch, channel, token, patch_x, patch_y)
+    patch_size = patches.shape[-2:]
+    token_lens = [math.ceil(image_size[dim]/patch_size[dim]) for dim in range(2)]
+    x = patches.view(*patches.shape[:-3], *token_lens, *patch_size)
+    pad_image_size = [token_lens[dim]*patch_size[dim] for dim in range(2)]
+    image = x.permute(0,1,2,4,3,5).reshape(*patches.shape[:-3], *pad_image_size)
+    if image.shape[-2:] != image_size:
+        image = vision.center_crop_to_shape(image, image_size)
+    return image # (batch, channel, x,y)
+
+def torch_flat_patch_to_img_2d(patches, image_size, patch_size=None): # (batch, channel, token, pixel)
+    if patch_size is None:
+        patch_size = [round(patches.size(-1)**.5)] * 2
+    patches = patches.view(*patches.shape[:-1], *patch_size)
+    return torch_patch_to_img_2d(patches, image_size)
+
+
 # iterative, attention over "patch proposals"
 class IterPatchSpRelNet(nn.Module):
     def __init__(self, image_size, num_labels, kernel_size=(9,9), num_heads=8,
@@ -92,8 +127,8 @@ class IterPatchSpRelNet(nn.Module):
             W[i:W.size(0):self.N_L, i, K[0],K[1]].zero_() # "mask" the inpainted patch
         self.r_m.weight = nn.Parameter(W)
 
-        self.tokenize = am_patches.torch_img_to_patch_2d
-        self.untokenize = am_patches.torch_patch_to_img_2d
+        self.tokenize = torch_img_to_patch_2d
+        self.untokenize = torch_patch_to_img_2d
 
 
     def V(self, x): # (batch, 1, token, pixel)

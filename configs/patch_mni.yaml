@@ -7,15 +7,13 @@ data loading:
 
 optimizer:
   epochs: 2000
-  checkpoint frequency: 10
+  checkpoint frequency: 100
   validation frequency: 10
   learning rate: 2e-5
   scheduler type: null
-  # accepts null, exponential, reduce on plateau
-
-phase 1 end: 50
-phase 2 end: 200
-number of refinements: 0
+  phase 1 end: 50
+  phase 2 end: 200
+  number of refinements: 1
 
 loss:
   weights:
@@ -26,7 +24,7 @@ loss:
     init guess weight: 1.
 
 network:
-  type: patch
+  type: iterative with attention over patch proposals
   number of heads: 12
   relation kernel size: 13
   number of relations: 32

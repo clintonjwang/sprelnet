@@ -105,18 +105,15 @@ def delete_job_outputs(job_name=None):
             delete_job_outputs(os.path.basename(path))
     else:
         path = f"{base_job_dir}/{job_name}"
-        
-        run_path = get_run_path_for_job(job_name)
-        if run_path is None:
-            return
         try:
-            run = api.run(run_path)
-            run.delete(delete_artifacts=True)
+            run_path = get_run_path_for_job(job_name)
+            if run_path is not None:
+                run = api.run(run_path)
+                run.delete(delete_artifacts=True)
+
+            shutil.rmtree(path)
         except:
             pass
-
-        shutil.rmtree(path)
-
 
 def parse_int_list(x):
     # converts string to a list of ints

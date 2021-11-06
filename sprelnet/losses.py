@@ -4,7 +4,7 @@ F = torch.nn.functional
 
 def determine_loss_weight(loss_name, epoch, loss_settings):
     base_weight = loss_settings["weights"][loss_name]
-    if "ramp epochs" in loss_settings and loss_name in loss_settings["ramp epochs"]
+    if "ramp epochs" in loss_settings and loss_name in loss_settings["ramp epochs"]:
         return base_weight * min(epoch/loss_settings["ramp epochs"][loss_name], 1)
     else:
         return base_weight
