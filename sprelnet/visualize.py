@@ -1,21 +1,30 @@
-import os, wandb
+import os, wandb, math, visdom
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 nn = torch.nn
 F = nn.functional
 
-from sprelnet import util
+from sprelnet import util, vision
 
-# def draw_image_with_colorbar(image, return_array=False, padding=None, pad_value=0, **kwargs):
-#     fig,ax = plt.subplots()
-#     plt.imshow(image, **kwargs)
-#     plt.colorbar()
-#     ax.set_axis_off()
-#     if return_array is True:
-#         array = get_figure_as_array(fig, height=pixels.height)
-#         fig.set_visible(False)
-#         return array
-#     return ax
+def add_colorbar_to_image(image, dpi=100, **kwargs):
+    fig,ax = plt.subplots()
+    if "vmax" not in kwargs and "vmin" not in kwargs:
+        minimum = image.min()
+        maximum = image.max()
+        kwargs["vmin"] = math.floor(minimum+.01)
+        kwargs["vmax"] = math.ceil(maximum-.01)
+    plt.imshow(image, **kwargs)
+    plt.colorbar()
+    ax.set_axis_off()
+    height=vision.get_height(image)
+    fig.set_dpi(dpi)
+    fig.tight_layout(pad=0)
+    fig.canvas.draw()
+    array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    array = array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close()
+    return array
 
 def get_multiscale_kernel_composite(relnet, label1, label2):
     kernels = []
@@ -71,7 +80,7 @@ def get_multiscale_likelihood_kernel_composite(relnet, label1, label2):
         mean_composite[lw:lw+dw, lh:lh+dh] += mean_kernels[-lvl-1]
         stdev_composite[lw:lw+dw, lh:lh+dh] += stdev_kernels[-lvl-1]
 
-    return mean_composite, stdev_composite
+    return mean_composite, torch.exp(stdev_composite/2)
 
 
 

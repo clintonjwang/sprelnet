@@ -2,7 +2,7 @@ import os
 import wandb, json
 import torch
 import numpy as np
-from fastai.vision import *
+# from fastai.vision import *
 #from fastai.callbacks.hooks import *
 # from fastai.callback import Callback
 # from wandb.fastai import WandbCallback
@@ -31,23 +31,39 @@ from sprelnet.data import mnist, pixels
 #     row += [gt_seg, pred_seg, iou]
 # table.add_data(*row)
 
-def update_metric(metric, value):
-    key = f"best {metric}"
-    if key in run.summary:
-        if metric in ["dice"]:
-            if value > run.summary[key]:
-                run.summary[key] = value
-        elif metric in ["loss"]:
-            if value < run.summary[key]:
-                run.summary[key] = value
+# def update_metric(metric, value):
+#     key = f"best {metric}"
+#     if key in run.summary:
+#         if metric in ["dice"]:
+#             if value > run.summary[key]:
+#                 run.summary[key] = value
+#         elif metric in ["loss"]:
+#             if value < run.summary[key]:
+#                 run.summary[key] = value
+#         else:
+#             raise NotImplementedError(f"cannot handle metric '{metric}'")
+#     else:
+#         run.summary[key] = value
+#     wandb.log({f"test {metric}": value})
+#     run.summary.update()
+
+def define_metrics(metrics):
+    for metric in metrics:
+        if "loss" in metric:
+            wandb.define_metric("test loss", summary="min")
+        elif "dice" in metric:
+            wandb.define_metric("test dice", summary="max")
+        elif "iou" in metric:
+            wandb.define_metric("test iou", summary="max")
         else:
-            raise NotImplementedError(f"cannot handle metric '{metric}'")
-    else:
-        run.summary[key] = value
-    wandb.log({f"test {metric}": value})
+            raise NotImplementedError(metric)
 
 def save_state(network, paths, run, model_artifact):
     torch.save(network.state_dict(), os.path.join(paths["model weights directory"], f"weights.state"))
+    try:
+        model_artifact.wait()
+    except ValueError:
+        pass
     run.log_artifact(model_artifact)
 
 def clear_runs(runs=None, filters=None):
@@ -66,32 +82,34 @@ def clear_failed_runs(runs=None):
     return clear_runs(filters={"state":"failed"})
 
 
-def log_relnet(relnet, dataset):
+def log_relnet(relnet, dataset, epoch=None):
     # log kernels
     if dataset["name"] == "MNIST grid":
         legend = mnist.get_multi_mnist_legend(key="index")
         for label_pair in mnist.label_pairs_of_interest:
             mean,std = visualize.get_multiscale_likelihood_kernel_composite(relnet, *label_pair)
-            wandb.log({f"mean kernel ({legend[label_pair[0]]} -> {legend[label_pair[1]]})": wandb.Image(mean),
-                    f"std kernel ({legend[label_pair[0]]} -> {legend[label_pair[1]]})": wandb.Image(std)})
+            wandb.log({f"mean kernel ({legend[label_pair[0]]} -> {legend[label_pair[1]]})": \
+                        wandb.Image(visualize.add_colorbar_to_image(mean)),
+                    f"std kernel ({legend[label_pair[0]]} -> {legend[label_pair[1]]})": \
+                    wandb.Image(visualize.add_colorbar_to_image(std))}, step=epoch)
     
     elif dataset["name"] == "pixels":
-        mean,std = visualize.get_multiscale_likelihood_kernel_composite(relnet, 0,1)
-        wandb.log({f"mean kernel (0-1)": wandb.Image(mean),
-                f"std kernel (0-1)": wandb.Image(std)})
-        mean,std = visualize.get_multiscale_likelihood_kernel_composite(relnet, 0,2)
-        wandb.log({f"mean kernel (0-2)": wandb.Image(mean),
-                f"std kernel (0-2)": wandb.Image(std)})
+        for label_pair in ((0,1), (0,2)):
+            mean,std = visualize.get_multiscale_likelihood_kernel_composite(relnet, *label_pair)
+            wandb.log({f"mean kernel ({label_pair[0]}-{label_pair[1]})": \
+                    wandb.Image(visualize.add_colorbar_to_image(mean)),
+                    f"std kernel ({label_pair[0]}-{label_pair[1]})": \
+                    wandb.Image(visualize.add_colorbar_to_image(std))}, step=epoch)
 
     else:
-        raise NotImplementedError
+        raise NotImplementedError("bad dataset")
 
 
-def log_sample_outputs(X, Y_gt, Y_hat, dataset, phase, n):
+def log_sample_outputs(X, Y_gt, Y_hat, dataset, phase, n, epoch=None):
     for i in range(n):
-        log_mask_img(X[i], Y_gt[i], Y_hat[i], dataset=dataset, name=f"{phase} {i+1}")
+        log_mask_img(X[i], Y_gt[i], Y_hat[i], dataset=dataset, name=f"{phase} {i+1}", epoch=epoch)
 
-def log_mask_img(x, y_gt, y_hat, dataset, name="mask image", label_subset=None, **kwargs):
+def log_mask_img(x, y_gt, y_hat, dataset, name="mask image", label_subset=None, epoch=None, **kwargs):
     if dataset["name"] == "MNIST grid":
         class_labels = mnist.get_multi_mnist_legend(key="class labels")
     elif dataset["name"] == "pixels":
@@ -100,7 +118,7 @@ def log_mask_img(x, y_gt, y_hat, dataset, name="mask image", label_subset=None, 
         raise NotImplementedError
 
     wandb.log({name: to_wandb_seg(x, y_gt, class_labels=class_labels, label_subset=label_subset, 
-        prediction=y_hat, **kwargs)})
+        prediction=y_hat, **kwargs)}, step=epoch)
     # wandb.log({"true seg":to_wandb_seg(x, y_gt, class_labels),
     #     "predicted seg":to_wandb_seg(x, y_hat, class_labels)})
     # x = to_wandb_img(x)

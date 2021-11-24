@@ -6,10 +6,10 @@ data loading:
   batch size: 16
 
 optimizer:
-  epochs: 100
-  checkpoint frequency: 5
+  epochs: 50
+  checkpoint frequency: 100
   validation frequency: 5
-  learning rate: 2e-5
+  learning rate: 1e-4
   scheduler type: null
   # accepts null, exponential, reduce on plateau
 
@@ -22,7 +22,7 @@ loss:
 network:
   type: relnet only
   output semantic: Gaussian likelihood
-  relation kernel size: 9
+  relation kernel size: 7
   number of relations: 3
 
 tags:

@@ -1,4 +1,4 @@
-import os, glob, yaml, zipfile, shutil, wandb, subprocess
+import os, glob, yaml, zipfile, shutil, wandb, subprocess, re
 import dill as pickle
 import numpy as np
 import torch
@@ -9,6 +9,26 @@ base_proj_dir = "/data/vision/polina/users/clintonw/code/sprelnet"
 base_job_dir = "/data/vision/polina/users/clintonw/code/sprelnet/job_outputs"
 entity_project = "spatial_relations/main_project"
 
+def get_number_in_string(string, n=1):
+    nums = re.findall(r"[\d.]+", string)
+    if len(nums) < n:
+        return
+    if n > 0:
+        n = n-1
+    if "." in nums[n]:
+        return float(nums[n])
+    else:
+        return int(nums[n])
+
+def get_all_regex_matches(pattern, string):
+    return list(re.finditer(pattern, string))
+
+def sample_without_replacement(X, size=None):
+    indices = np.random.choice(range(len(X)), size=size, replace=False)
+    if size is None:
+        return X[indices]
+    return [X[ix] for ix in indices]
+
 def set_random_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -16,10 +36,8 @@ def set_random_seed(seed):
 def get_num_labels(dataset):
     if dataset["name"] == "MNIST grid":
         return len(dataset["train label counts"])
-
     elif dataset["name"] == "pixels":
         return dataset["number of labels"]
-        
     else:
         raise NotImplementedError
 

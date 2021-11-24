@@ -1,3 +1,4 @@
+import wandb
 import torch
 nn = torch.nn
 F = torch.nn.functional
@@ -47,9 +48,32 @@ def get_bce_loss(dataset):
 
 def iou(pred_seg, gt_seg):
     with torch.no_grad():
-        return ((pred_seg & gt_seg).sum(axis=(1,2)) / (pred_seg | gt_seg).sum(axis=(1,2)))
+        return ((pred_seg & gt_seg).sum(axis=(2,3)) / (pred_seg | gt_seg).sum(axis=(2,3))).mean(1)
 
 def dice(pred_seg, gt_seg):
     with torch.no_grad():
-        return (2*(pred_seg & gt_seg).sum(axis=(1,2)) / (
-            pred_seg.sum(axis=(1,2)) + gt_seg.sum(axis=(1,2))))
+        return (2*(pred_seg & gt_seg).sum(axis=(2,3)) / (
+            pred_seg.sum(axis=(2,3)) + gt_seg.sum(axis=(2,3)))).mean(1)
+
+loss_tracker = {}
+def track_metric(name, value):
+    if name not in loss_tracker:
+        loss_tracker[name] = value
+    else:
+        loss_tracker[name] += value
+
+def log_metric(name, n_batches=None, epoch=None):
+    if name not in loss_tracker:
+        return
+    if n_batches is None:
+        wandb.log({
+            name: loss_tracker.pop(name),
+        }, step=epoch)
+    else:
+        wandb.log({
+            name: loss_tracker.pop(name)/n_batches,
+        }, step=epoch)
+
+def log_metrics(names, **kwargs):
+    for name in names:
+        log_metric(name, **kwargs)

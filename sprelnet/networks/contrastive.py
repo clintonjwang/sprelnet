@@ -9,8 +9,23 @@ from sprelnet.networks.unet import *
 # def randomly_scale_image():
 # def randomly_rotate_image():
     
-def get_contra_net():
-    return
+def get_contra_net(net_HPs, dataset):
+    kwargs = {
+        "image_size": dataset["image size"],
+        "num_labels": util.get_num_labels(dataset),
+        "kernel_size": (net_HPs["relation kernel size"], net_HPs["relation kernel size"]),
+        "num_relations": net_HPs["number of relations"],
+        "initseg_HPs": net_HPs["segmenter architecture"],
+    }
+    initseg_HPs = kwargs["initseg_HPs"]
+    if isinstance(initseg_HPs["channels by depth"], str):
+        initseg_HPs["channels by depth"] = initseg_HPs["channels by depth"].replace("N_L", str(kwargs["num_labels"]))
+        for k,v in initseg_HPs.items():
+            initseg_HPs[k] = util.parse_int_list(v)
+
+    return ContrastiveSpRelNet(**kwargs).cuda()
+
+
 # contrastive losses with test-time gradient ascent
 class ContrastiveSpRelNet(nn.Module):
     def __init__(self, image_size, num_labels, kernel_size=(9,9),

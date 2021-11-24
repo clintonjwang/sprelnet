@@ -7,7 +7,7 @@ from sprelnet import util
 
 ds_folder = '/data/vision/polina/scratch/clintonw/datasets'
 pixel_ds_path = os.path.join(ds_folder, 'pixel_ds.bin')
-class_labels = {1:"base", 2:"downright", 3:"negative"}
+class_labels = {1:"base", 2:"SE", 3:"NW"}
 
 def get_pixel_dataset(run=None, **kwargs):
     if os.path.exists(pixel_ds_path):
@@ -30,15 +30,15 @@ def create_pixel_dataset(N_train=9000, N_test=1000, N_labels=3, image_size=(16,1
             i,j = np.random.randint(0, image_size[0]), np.random.randint(0, image_size[1])
             dp[0,i,j] = 1.
             if i+offsets[0][0] < image_size[0] and j+offsets[0][1] < image_size[1]:
-                dp[1,i+offsets[0][0],j+offsets[0][1]] = 1.
+                dp[1,i+offsets[0][0],j+offsets[0][1]] += 1.
             if i+offsets[1][0] < image_size[0] and j+offsets[1][1] < image_size[1]:
-                dp[2,i+offsets[1][0],j+offsets[1][1]] = -1.
+                dp[2,i+offsets[1][0],j+offsets[1][1]] += 1.
             if np.random.rand() > .5:
                 break
         datapoints.append(dp)
 
     dataset = {"name": "pixels",
-        "number of labels": 3,
+        "number of labels": N_labels,
         "image size": image_size, "train datapoints":datapoints[:N_train],
         "test datapoints":datapoints[N_train:],
         "offsets": offsets,

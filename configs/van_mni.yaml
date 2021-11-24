@@ -7,8 +7,8 @@ data loading:
 
 optimizer:
   epochs: 2000
-  checkpoint frequency: 10
-  validation frequency: 10
+  checkpoint frequency: 200
+  validation frequency: 20
   G learning rate: 2e-5
   relnet learning rate: 2e-5
   scheduler type: null
@@ -18,8 +18,10 @@ loss:
   weights:
     relation sparsity: 1.
     relation smooth: 1.
-    relation score: 1.
+    relation score: .1
     cross entropy: 1.
+  ramp epochs:
+    relation score: 1000
 
 network:
   type: vanilla

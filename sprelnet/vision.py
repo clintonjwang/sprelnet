@@ -2,6 +2,12 @@ import torch
 nn = torch.nn
 F = nn.functional
 
+def get_height(image):
+    if image.shape[0] > 3:
+        return image.shape[0]
+    else:
+        return image.shape[1]
+
 
 def apply_padding(tensor, pad, value=0):
     if len(tensor.shape) < 3:
