@@ -76,15 +76,15 @@ def mask2poly(mask):
     for object in contours:
         coords = []
         for point in object:
-            coords.append(int(point[0][0]))
-            coords.append(int(point[0][1]))
+            coords.append(float(point[0][0]))
+            coords.append(float(point[0][1]))
         polygons.append(coords)
     return polygons
 
 def create_mnist_grid_coco_dataset(N_train=4000, N_val=1000, digits_per_dim=(5,5), scale_factor=2):
     if digits_per_dim != (5,5):
         raise NotImplementedError
-    if os.path.exists(mnist_grid_dir):
+    if osp.exists(mnist_grid_dir):
         shutil.rmtree(mnist_grid_dir)
     os.makedirs(osp.join(mnist_grid_dir, "train"))
     os.makedirs(osp.join(mnist_grid_dir, "val"))
@@ -96,7 +96,7 @@ def create_mnist_grid_coco_dataset(N_train=4000, N_val=1000, digits_per_dim=(5,5
     }
     base_dataset["images by label"] = [base_dataset["images"][base_dataset["labels"] == ix] for ix in range(10)]
 
-    category_names = get_multi_mnist_legend().keys()
+    category_names = list(get_multi_mnist_legend().keys())
     n_digits = np.prod(digits_per_dim)
     coco_categories = []
     for ix, label_name in enumerate(category_names):
@@ -113,7 +113,7 @@ def create_mnist_grid_coco_dataset(N_train=4000, N_val=1000, digits_per_dim=(5,5
     annotations = []
     for dp_id in range(N_train):
         img_info, anns = create_mnist_grid_coco_datapoint(base_dataset, n_digits,
-            dp_id, scale_factor=scale_factor, ann_id=len(annotations), img_dir=os.path.join(mnist_grid_dir, "train"),
+            dp_id, scale_factor=scale_factor, ann_id=len(annotations), img_dir=osp.join(mnist_grid_dir, "train"),
             category_names=category_names)
         imgs.append(img_info)
         annotations += anns
@@ -123,14 +123,14 @@ def create_mnist_grid_coco_dataset(N_train=4000, N_val=1000, digits_per_dim=(5,5
         "annotations": annotations,
         "categories": coco_categories,
     }
-    with open(os.path.join(mnist_grid_dir, "train/annotation_coco.json"), 'w') as f:
+    with open(osp.join(mnist_grid_dir, "train/annotation_coco.json"), 'w') as f:
         json.dump(train_ds, f)
 
     imgs = []
     annotations = []
     for dp_id in range(N_train, N_val+N_train):
         img_info, anns = create_mnist_grid_coco_datapoint(base_dataset, n_digits,
-            dp_id, scale_factor=scale_factor, ann_id=len(annotations), img_dir=os.path.join(mnist_grid_dir, "val"),
+            dp_id, scale_factor=scale_factor, ann_id=len(annotations), img_dir=osp.join(mnist_grid_dir, "val"),
             category_names=category_names)
         imgs.append(img_info)
         annotations += anns
@@ -140,20 +140,21 @@ def create_mnist_grid_coco_dataset(N_train=4000, N_val=1000, digits_per_dim=(5,5
         "annotations": annotations,
         "categories": coco_categories,
     }
-    with open(os.path.join(mnist_grid_dir, "val/annotation_coco.json"), 'w') as f:
+    with open(osp.join(mnist_grid_dir, "val/annotation_coco.json"), 'w') as f:
         json.dump(val_ds, f)
 
-def fetch_mnist_grid_img(coco_id, with_anns=False):
+def fetch_mnist_grid_img(coco_id, with_anns=True, coco_object=None):
     # path = osp.join(mnist_grid_dir, f"val/{coco_id}.jpg")
     # img = plt.imread(path)
-    annFile = os.path.join(mnist_grid_dir, "val/annotation_coco.json")
-    coco = COCO(annFile)
-    img_info = coco.loadImgs([int(coco_id)])[0]
+    if coco_object is None:
+        annFile = osp.join(mnist_grid_dir, "val/annotation_coco.json")
+        coco_object = COCO(annFile)
+    img_info = coco_object.loadImgs([int(coco_id)])[0]
     img = io.imread('%s/%s/%s'%(mnist_grid_dir,"val",img_info['file_name']), as_gray=True)
     if with_anns:
-        annIds = coco.getAnnIds(imgIds=img_info['id'], iscrowd=None)
-        anns = coco.loadAnns(annIds)
-        return img, anns, coco
+        annIds = coco_object.getAnnIds(imgIds=img_info['id'], iscrowd=None)
+        anns = coco_object.loadAnns(annIds)
+        return img, anns
     else:
         return img
 
@@ -181,12 +182,20 @@ def create_mnist_grid_coco_datapoint(base_dataset, n_digits, dp_id, ann_id,
 
     img_height, img_width = superimage.shape
     anns = []
+    relation_dict = {
+        "above": (0,1),
+        "left of": (1,0),
+        "right of": (-1,0),
+        "below": (0,-1),
+    }
     for index, digit in enumerate(sublabels):
         if digit not in [6,7]:
             continue
+
+        y,x = index // 5, index % 5
         if digit == 6:
             category = "all 6s"
-            category_id = category_names.index(category)
+            flag = True
 
         elif digit == 7:
             query_digit = 6
@@ -198,47 +207,33 @@ def create_mnist_grid_coco_datapoint(base_dataset, n_digits, dp_id, ann_id,
                     category = f"7 {relation} 6"
             if flag is False:
                 category = "other 7s"
-            category_id = category_names.index(category)
-        # for category_id, category in enumerate(category_names):
-        #     flag = False
-        #     y,x = index // 5, index % 5
-        #     if category.startswith("all"):
-        #         flag = (digit == util.get_number_in_string(category))
-        #     else:
-        #         relation_dict = {
-        #             "above": (0,1),
-        #             "left of": (1,0),
-        #             "right of": (-1,0),
-        #             "below": (0,-1),
-        #         }
-        #         for relation in relation_dict:
-        #             if relation in category:
-        #                 if digit == int(category[0]): # this is the right digit
-        #                     dx,dy = relation_dict[relation]
-        #                     query_digit = int(category[-1])
-        #                     if inrange(x+dx, y+dy) and sublabels[(y+dy)*5 + x+dx] == query_digit:
-        #                         flag = True
-        #                 break
 
-        mask = torch.zeros_like(superimage)
-        y_offset = y*dh
-        x_offset = x*dh
-        mask[y_offset:y_offset+dh, x_offset:x_offset+dh] = (subimgs[index] > 128)
-        y1,x1 = mask.nonzero().min(0).values
-        y2,x2 = mask.nonzero().max(0).values
-        #seg = cocomask.encode(np.asfortranarray(mask.numpy()))
-        seg = mask2poly(mask)
-        annotation = {
-            "id": ann_id,
-            "image_id": dp_id,
-            "category_id": category_id,
-            "segmentation": seg,
-            "area": (subimgs[index] / 256.).sum().item(),
-            "bbox": [x1.item(),y1.item(),(x2-x1).item(),(y2-y1).item()],
-            "iscrowd": 0,
-        }
-        ann_id += 1
-        anns.append(annotation)
+        if category in category_names:
+            category_id = category_names.index(category)
+            mask = torch.zeros_like(superimage)
+            y_offset = y*dh
+            x_offset = x*dh
+            mask[y_offset:y_offset+dh, x_offset:x_offset+dh] = (subimgs[index] > 128)
+            y1,x1 = mask.nonzero().min(0).values
+            y2,x2 = mask.nonzero().max(0).values
+            #seg = cocomask.encode(np.asfortranarray(mask.numpy()))
+            seg = mask2poly(mask)
+            if len(seg[0]) <= 4:
+                if len(seg) > 1:
+                    seg = seg[1:]
+                else:
+                    raise ValueError("bad mask")
+            annotation = {
+                "id": ann_id,
+                "image_id": dp_id,
+                "category_id": category_id,
+                "segmentation": seg,
+                "area": (subimgs[index] / 256.).sum().item(),
+                "bbox": [x1.item(),y1.item(),(x2-x1).item(),(y2-y1).item()],
+                "iscrowd": 0,
+            }
+            ann_id += 1
+            anns.append(annotation)
 
     fn = f"{dp_id}.jpg"
     img_info = {
@@ -247,6 +242,6 @@ def create_mnist_grid_coco_datapoint(base_dataset, n_digits, dp_id, ann_id,
         "height": img_height,
         "file_name": fn,
     }
-    plt.imsave(os.path.join(img_dir, fn), arr=superimage.numpy())
+    plt.imsave(osp.join(img_dir, fn), arr=superimage.numpy())
     assert len(anns) > 0, "each img should have at least 1 annotation"
     return img_info, anns
